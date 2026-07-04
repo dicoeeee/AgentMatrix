@@ -1,0 +1,29 @@
+{
+  "name": "agentmatrix",
+  "version": "0.1.0",
+  "description": "Workflow orchestration kit for AI coding agents.",
+  "type": "module",
+  "bin": {
+    "agentmatrix": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:cli": "node --test test/cli.test.js",
+    "test": "npm run build && npm run test:cli",
+    "check": "npm run typecheck && npm test"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dependencies": {
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

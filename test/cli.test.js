@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { parse } from "yaml";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -76,6 +77,57 @@ test("init creates a project-local runtime skeleton without requiring git", asyn
   const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
   assert.equal(await exists(workflowPath), true);
   assert.match(await readFile(workflowPath, "utf8"), /id: mr-preflight/);
+});
+
+test("init can choose the built-in mr-preflight workflow template", async () => {
+  const cwd = await tempProject();
+  const result = await runCli(["init", "--workflow", "mr-preflight"], cwd);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /mr-preflight\.workflow\.yml/);
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  assert.match(await readFile(workflowPath, "utf8"), /id: mr-preflight/);
+
+  const unsupported = await runCli(["init", "--workflow", "unknown"], await tempProject());
+  assert.equal(unsupported.code, 2);
+  assert.match(unsupported.stderr, /Unknown workflow template/);
+});
+
+test("init copies an editable mr-preflight workflow with complete stage contracts", async () => {
+  const cwd = await tempProject();
+  const result = await runCli(["init"], cwd);
+
+  assert.equal(result.code, 0, result.stderr);
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const workflow = parse(await readFile(workflowPath, "utf8"));
+
+  assert.equal(workflow.id, "mr-preflight");
+  assert.deepEqual(
+    workflow.stages.map((stage) => stage.id),
+    ["static_check", "test_check", "code_review", "mr_prepare"]
+  );
+  assert.deepEqual(
+    workflow.stages.map((stage) => stage.depends_on),
+    [[], ["static_check"], ["test_check"], ["code_review"]]
+  );
+
+  for (const stage of workflow.stages) {
+    assert.ok(Array.isArray(stage.inputs), `${stage.id} should declare inputs`);
+    assert.ok(Array.isArray(stage.outputs), `${stage.id} should declare outputs`);
+    assert.ok(Array.isArray(stage.completion_criteria), `${stage.id} should declare completion criteria`);
+    assert.ok(stage.repair_policy, `${stage.id} should declare repair policy`);
+    assert.ok(Array.isArray(stage.rerun_when), `${stage.id} should declare rerun triggers`);
+    assert.equal(typeof stage.agent_role, "string");
+    assert.equal(typeof stage.verifier_role, "string");
+    assert.ok(Array.isArray(stage.skills), `${stage.id} should declare platform-visible skills`);
+    assert.equal(Object.hasOwn(stage, "command"), false, `${stage.id} should not define a command abstraction`);
+  }
+
+  const skillNames = workflow.stages.flatMap((stage) => stage.skills);
+  assert.ok(skillNames.includes("static-check"));
+  assert.ok(skillNames.includes("industry-code-review"));
 });
 
 test("run always creates a fresh filesystem-backed run", async () => {

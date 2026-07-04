@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
 import { createRun, initializeProject, readRunForDisplay, readRuns, resumeRun } from "./storage.js";
+import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
 import { AGENTMATRIX_DIR } from "./types.js";
 import { runToGraph, runToMermaid } from "./visualize.js";
 
@@ -47,7 +48,7 @@ const COMMAND_HELP: Record<string, string> = {
 Create the project-local AgentMatrix skeleton under .agentmatrix/.
 
 Usage:
-  agentmatrix [--project <dir>] init
+  agentmatrix [--project <dir>] init [--workflow mr-preflight]
 `,
   run: `agentmatrix run
 
@@ -127,8 +128,8 @@ export async function runCli(argv: string[], io: CliIo = process): Promise<numbe
 }
 
 async function handleInit(projectRoot: string, args: string[], io: CliIo) {
-  rejectHelpOrOptions(args, "init");
-  const result = await initializeProject(projectRoot);
+  const { workflowId } = parseInitArgs(args);
+  const result = await initializeProject(projectRoot, workflowId);
   const action = result.workflowCreated ? "created" : "already present";
   io.stdout.write(`Initialized AgentMatrix in ${result.projectRoot}\n`);
   io.stdout.write(`Workflow ${action}: ${path.relative(result.projectRoot, result.workflowPath)}\n`);
@@ -209,11 +210,42 @@ function parseGlobalOptions(argv: string[]): GlobalParseResult {
   return { projectRoot, args };
 }
 
-function rejectHelpOrOptions(args: string[], command: string) {
-  for (const token of args) {
-    rejectOptionToken(token, command);
-    rejectUnexpectedPositional(token, command);
+function parseInitArgs(args: string[]) {
+  let workflowId = DEFAULT_WORKFLOW_ID;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+
+    if (token === "--workflow") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new CliUsageError("Missing value for --workflow.");
+      }
+      workflowId = parseWorkflowTemplate(value);
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--workflow=")) {
+      workflowId = parseWorkflowTemplate(token.slice("--workflow=".length));
+      continue;
+    }
+
+    rejectOptionToken(token, "init");
+    rejectUnexpectedPositional(token, "init");
   }
+
+  return { workflowId };
+}
+
+function parseWorkflowTemplate(value: string) {
+  if (isBuiltInWorkflowId(value)) {
+    return value;
+  }
+
+  throw new CliUsageError(
+    `Unknown workflow template "${value}". Built-in workflows: ${BUILT_IN_WORKFLOW_IDS.join(", ")}.`
+  );
 }
 
 function parseOptionalPositional(args: string[], command: string, name: string) {

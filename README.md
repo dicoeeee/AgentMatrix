@@ -21,4 +21,6 @@ node dist/cli.js --help
 
 Supported MVP verbs are `init`, `run`, `resume`, `status`, and `visualize`.
 
-`agentmatrix init` creates a project-local `.agentmatrix/` directory with workflow templates, run state, and artifact directories. It does not initialize or require git in the target project. `agentmatrix run` creates a fresh run every time; `resume`, `status`, and `visualize` operate on the filesystem-backed run state.
+`agentmatrix init --workflow mr-preflight` creates a project-local `.agentmatrix/` directory with workflow templates, run state, and artifact directories. It does not initialize or require git in the target project. `agentmatrix run` creates a fresh run every time; `resume`, `status`, and `visualize` operate on the filesystem-backed run state.
+
+The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction.

@@ -3,7 +3,12 @@ import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { AgentMatrixError } from "./errors.js";
-import { DEFAULT_WORKFLOW_FILE, DEFAULT_WORKFLOW_ID, DEFAULT_WORKFLOW_YAML } from "./templates.js";
+import {
+  DEFAULT_WORKFLOW_FILE,
+  DEFAULT_WORKFLOW_ID,
+  DEFAULT_WORKFLOW_YAML,
+  isBuiltInWorkflowId
+} from "./templates.js";
 import { AGENTMATRIX_DIR, type RunState, type WorkflowDefinition } from "./types.js";
 import { parseWorkflow } from "./workflow.js";
 
@@ -16,7 +21,8 @@ export interface InitResult {
   workflowCreated: boolean;
 }
 
-export async function initializeProject(projectRoot: string): Promise<InitResult> {
+export async function initializeProject(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<InitResult> {
+  assertBuiltInWorkflow(workflowId);
   const paths = projectPaths(projectRoot);
 
   await mkdir(paths.workflowsDir, { recursive: true });
@@ -28,7 +34,7 @@ export async function initializeProject(projectRoot: string): Promise<InitResult
     JSON.stringify(
       {
         schemaVersion: 1,
-        defaultWorkflow: DEFAULT_WORKFLOW_ID,
+        defaultWorkflow: workflowId,
         workflowsDir: "workflows",
         runsDir: "runs",
         artifactsDir: "artifacts"
@@ -72,8 +78,14 @@ export async function createRun(projectRoot: string, workflowId = DEFAULT_WORKFL
       name: stage.name,
       status: "pending",
       dependsOn: stage.dependsOn,
+      inputs: stage.inputs,
+      outputs: stage.outputs,
+      completionCriteria: stage.completionCriteria,
+      repairPolicy: stage.repairPolicy,
+      rerunWhen: stage.rerunWhen,
       agentRole: stage.agentRole,
       verifierRole: stage.verifierRole,
+      skills: stage.skills,
       evidence: [],
       artifacts: []
     })),
@@ -201,6 +213,12 @@ function workflowPath(projectRoot: string, workflowId: string) {
   }
 
   return projectPaths(projectRoot).defaultWorkflowPath;
+}
+
+function assertBuiltInWorkflow(workflowId: string) {
+  if (!isBuiltInWorkflowId(workflowId)) {
+    throw new AgentMatrixError(`Workflow template "${workflowId}" is not available.`);
+  }
 }
 
 function createRunId() {

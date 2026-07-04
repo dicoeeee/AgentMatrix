@@ -105,6 +105,7 @@ export async function createRun(projectRoot: string, workflowId = DEFAULT_WORKFL
 export async function resumeRun(projectRoot: string, runId?: string): Promise<RunState> {
   const paths = projectPaths(projectRoot);
   const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
+  await loadWorkflow(paths.projectRoot, runState.workflowId);
   const now = new Date().toISOString();
 
   runState.updatedAt = now;
@@ -149,6 +150,10 @@ export async function readRunForDisplay(projectRoot: string, runId?: string): Pr
     throw new AgentMatrixError("No AgentMatrix runs found.");
   }
   return latest;
+}
+
+export async function validateWorkflowFile(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<void> {
+  await loadWorkflow(projectRoot, workflowId);
 }
 
 export function projectPaths(projectRoot: string) {

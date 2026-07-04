@@ -3,7 +3,14 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
-import { createRun, initializeProject, readRunForDisplay, readRuns, resumeRun } from "./storage.js";
+import {
+  createRun,
+  initializeProject,
+  readRunForDisplay,
+  readRuns,
+  resumeRun,
+  validateWorkflowFile
+} from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
 import { AGENTMATRIX_DIR } from "./types.js";
 import { runToGraph, runToMermaid } from "./visualize.js";
@@ -169,6 +176,7 @@ async function handleStatus(projectRoot: string, args: string[], io: CliIo) {
 async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
   const { runId, format } = parseVisualizeArgs(args);
   const runState = await readRunForDisplay(projectRoot, runId);
+  await validateWorkflowFile(projectRoot, runState.workflowId);
 
   if (format === "json") {
     io.stdout.write(`${JSON.stringify(runToGraph(runState), null, 2)}\n`);

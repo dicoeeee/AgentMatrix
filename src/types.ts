@@ -1,3 +1,5 @@
+import type { CompletionCriterionType, RerunTriggerType } from "./workflow-constants.js";
+
 export const AGENTMATRIX_DIR = ".agentmatrix";
 
 export type StageStatus = "pending" | "running" | "success" | "failed" | "skipped";
@@ -34,7 +36,7 @@ export interface WorkflowOutput {
 }
 
 export interface CompletionCriterion {
-  type: string;
+  type: CompletionCriterionType;
   output?: string;
   schema?: string;
 }
@@ -46,7 +48,7 @@ export interface RepairPolicy {
 }
 
 export interface RerunTrigger {
-  type: string;
+  type: RerunTriggerType;
   paths: string[];
   artifacts: string[];
 }

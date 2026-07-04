@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -160,6 +160,95 @@ test("run always creates a fresh filesystem-backed run", async () => {
       ["mr_prepare", "pending"]
     ]
   );
+});
+
+test("run validates edited workflow before creating a run", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  await writeFile(
+    workflowPath,
+    `schema_version: 1
+id: mr-preflight
+name: Broken
+stages:
+  - id: static_check
+    depends_on: []
+    inputs:
+      - id: workspace
+        required: true
+    completion_criteria:
+      - type: output_exists
+        output: stage_report
+    repair_policy:
+      allow_repair: false
+      max_attempts: 0
+      writes_allowed: false
+    rerun_when: []
+    agent_role: static_check
+    verifier_role: static_check_verifier
+    skills: []
+`
+  );
+
+  const result = await runCli(["run"], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /mr-preflight\.workflow\.yml/);
+  assert.match(result.stderr, /stages\[0\]\.outputs/);
+  assert.deepEqual(await readdir(path.join(cwd, ".agentmatrix", "runs")), []);
+});
+
+test("resume validates the edited workflow before continuing a run", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+  const runId = parseRunId((await runCli(["run"], cwd)).stdout);
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const validWorkflow = await readFile(workflowPath, "utf8");
+  await writeFile(workflowPath, validWorkflow.replace("      - type: output_exists", "      - type: conversation_accepts"));
+
+  const result = await runCli(["resume", runId], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /mr-preflight\.workflow\.yml/);
+  assert.match(result.stderr, /completion_criteria\[0\]\.type/);
+});
+
+test("visualize validates the edited workflow before rendering run state", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+  const runId = parseRunId((await runCli(["run"], cwd)).stdout);
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const validWorkflow = await readFile(workflowPath, "utf8");
+  await writeFile(workflowPath, validWorkflow.replace("    verifier_role: static_check_verifier", "    verifier_role: opencode/static_check_verifier"));
+
+  const result = await runCli(["visualize", runId], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /mr-preflight\.workflow\.yml/);
+  assert.match(result.stderr, /stages\[0\]\.verifier_role/);
+});
+
+test("run validation reports malformed YAML and unsupported workflow status from temporary projects", async () => {
+  const malformed = await tempProject();
+  assert.equal((await runCli(["init"], malformed)).code, 0);
+  const malformedWorkflowPath = path.join(malformed, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  await writeFile(malformedWorkflowPath, "schema_version: [");
+
+  const malformedResult = await runCli(["run"], malformed);
+  assert.equal(malformedResult.code, 1);
+  assert.match(malformedResult.stderr, /Invalid workflow YAML/);
+  assert.match(malformedResult.stderr, /mr-preflight\.workflow\.yml/);
+
+  const unsupportedStatus = await tempProject();
+  assert.equal((await runCli(["init"], unsupportedStatus)).code, 0);
+  const statusWorkflowPath = path.join(unsupportedStatus, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const validWorkflow = await readFile(statusWorkflowPath, "utf8");
+  await writeFile(statusWorkflowPath, validWorkflow.replace("    name: Static Check", "    name: Static Check\n    status: done"));
+
+  const statusResult = await runCli(["run"], unsupportedStatus);
+  assert.equal(statusResult.code, 1);
+  assert.match(statusResult.stderr, /stages\[0\]\.status/);
 });
 
 test("resume, status, and visualize expose run state", async () => {

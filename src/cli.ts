@@ -3,6 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
+import { createMockRuntimeAdapter } from "./mock-runtime.js";
 import {
   createRun,
   initializeProject,
@@ -144,9 +145,12 @@ async function handleInit(projectRoot: string, args: string[], io: CliIo) {
 
 async function handleRun(projectRoot: string, args: string[], io: CliIo) {
   const workflowId = parseOptionalPositional(args, "run", "workflow");
-  const runState = await createRun(projectRoot, workflowId);
+  const runState = await createRun(projectRoot, workflowId, { runtimeAdapter: createMockRuntimeAdapter() });
   io.stdout.write(`Created run ${runState.id} for workflow ${runState.workflowId}\n`);
   io.stdout.write(`State: ${AGENTMATRIX_DIR}/runs/${runState.id}/run.json\n`);
+  if (runState.status === "success") {
+    io.stdout.write(`Completed run ${runState.id}\n`);
+  }
 }
 
 async function handleResume(projectRoot: string, args: string[], io: CliIo) {

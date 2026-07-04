@@ -16,7 +16,15 @@ import {
   DEFAULT_WORKFLOW_YAML,
   isBuiltInWorkflowId
 } from "./templates.js";
-import { AGENTMATRIX_DIR, type RunState, type WorkflowDefinition } from "./types.js";
+import {
+  AGENTMATRIX_DIR,
+  type RunStageState,
+  type RunState,
+  type StageExecutionContext,
+  type StageVerificationContext,
+  type WorkflowDefinition,
+  type WorkflowRuntimeAdapter
+} from "./types.js";
 import { parseWorkflow } from "./workflow.js";
 
 const CONFIG_FILE = "config.json";
@@ -30,6 +38,7 @@ export interface InitResult {
 
 export interface RuntimeOptions {
   resourceProvider?: ResourceProvider;
+  runtimeAdapter?: WorkflowRuntimeAdapter;
 }
 
 interface ProjectConfig {
@@ -78,6 +87,10 @@ export async function createRun(
   const paths = projectPaths(projectRoot);
   const workflow = await loadWorkflow(paths.projectRoot, workflowId);
   await assertWorkflowResourcesAvailable(workflow, options.resourceProvider ?? (await loadProjectResourceProvider(paths)));
+  if (!options.runtimeAdapter) {
+    throw new AgentMatrixError("Workflow execution adapter is not configured.");
+  }
+
   const runId = createRunId();
   const runDir = path.join(paths.runsDir, runId);
   const artifactDir = path.join(paths.artifactsDir, runId);
@@ -122,7 +135,7 @@ export async function createRun(
   };
 
   await writeRun(paths.projectRoot, runState);
-  return runState;
+  return executeFreshRun(paths.projectRoot, runState, options.runtimeAdapter);
 }
 
 export async function resumeRun(
@@ -209,6 +222,143 @@ async function loadWorkflow(projectRoot: string, workflowId: string): Promise<Wo
   }
 
   return parseWorkflow(await readFile(filePath, "utf8"), filePath);
+}
+
+async function executeFreshRun(
+  projectRoot: string,
+  runState: RunState,
+  runtimeAdapter: WorkflowRuntimeAdapter
+): Promise<RunState> {
+  updateRun(runState, "running");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "run_started",
+    message: "Fresh workflow run started."
+  });
+  await writeRun(projectRoot, runState);
+
+  for (const stage of runState.stages) {
+    assertDependenciesSuccessful(runState, stage);
+    await executeStage(projectRoot, runState, stage, runtimeAdapter);
+  }
+
+  updateRun(runState, "success");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "run_completed",
+    message: "Fresh workflow run completed."
+  });
+  await writeRun(projectRoot, runState);
+
+  return runState;
+}
+
+async function executeStage(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  runtimeAdapter: WorkflowRuntimeAdapter
+) {
+  updateStage(runState, stage, "running");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "stage_started",
+    stageId: stage.id,
+    message: `Stage ${stage.id} started.`
+  });
+  await writeRun(projectRoot, runState);
+
+  const stageReportPath = stageReportArtifactPath(runState, stage);
+  const executorEvidencePath = artifactPath(runState, stage.id, "executor-evidence.json");
+  const verifierEvidencePath = artifactPath(runState, stage.id, "verifier-evidence.json");
+  const executionContext: StageExecutionContext = {
+    projectRoot,
+    runState,
+    stage,
+    stageReportPath,
+    executorEvidencePath
+  };
+
+  const execution = await runtimeAdapter.executeStage(executionContext);
+
+  stage.artifacts = [execution.stageReportPath];
+  stage.evidence = [execution.evidencePath];
+  touchRun(runState);
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "stage_executor_completed",
+    stageId: stage.id,
+    message: `Mock executor completed stage ${stage.id}.`
+  });
+  await writeRun(projectRoot, runState);
+
+  const verificationContext: StageVerificationContext = {
+    projectRoot,
+    runState,
+    stage,
+    stageReportPath: execution.stageReportPath,
+    verifierEvidencePath
+  };
+  const verification = await runtimeAdapter.verifyStage(verificationContext);
+
+  stage.evidence.push(verification.evidencePath);
+  if (!verification.accepted) {
+    updateStage(runState, stage, "failed");
+    runState.status = "failed";
+    runState.events.push({
+      at: runState.updatedAt,
+      type: "stage_verified",
+      stageId: stage.id,
+      message: `Verifier ${stage.verifierRole} rejected stage ${stage.id}.`
+    });
+    await writeRun(projectRoot, runState);
+    throw new AgentMatrixError(`Verifier ${stage.verifierRole} rejected stage "${stage.id}".`);
+  }
+
+  updateStage(runState, stage, "success");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "stage_verified",
+    stageId: stage.id,
+    message: `Verifier ${stage.verifierRole} accepted stage ${stage.id}.`
+  });
+  await writeRun(projectRoot, runState);
+}
+
+function assertDependenciesSuccessful(runState: RunState, stage: RunStageState) {
+  for (const dependencyId of stage.dependsOn) {
+    const dependency = runState.stages.find((candidate) => candidate.id === dependencyId);
+    if (!dependency || dependency.status !== "success") {
+      throw new AgentMatrixError(`Stage "${stage.id}" cannot start before dependency "${dependencyId}" succeeds.`);
+    }
+  }
+}
+
+function stageReportArtifactPath(runState: RunState, stage: RunStageState) {
+  const stageReport = stage.outputs.find((output) => output.id === "stage_report");
+  if (!stageReport) {
+    throw new AgentMatrixError(`Stage "${stage.id}" does not declare a stage_report output.`);
+  }
+
+  return path.join(runState.artifactPath, stageReport.path);
+}
+
+function artifactPath(runState: RunState, stageId: string, fileName: string) {
+  return path.join(runState.artifactPath, stageId, fileName);
+}
+
+function updateStage(runState: RunState, stage: RunStageState, status: RunStageState["status"]) {
+  stage.status = status;
+  touchRun(runState);
+}
+
+function updateRun(runState: RunState, status: RunState["status"]) {
+  runState.status = status;
+  touchRun(runState);
+}
+
+function touchRun(runState: RunState) {
+  runState.updatedAt = new Date().toISOString();
 }
 
 async function loadProjectResourceProvider(paths: ReturnType<typeof projectPaths>): Promise<ResourceProvider> {

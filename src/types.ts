@@ -68,12 +68,20 @@ export interface RunStageState extends StageDefinitionFields {
   artifacts: string[];
 }
 
-export type RunEventType = "run_created" | "resume_requested";
+export type RunEventType =
+  | "run_created"
+  | "run_started"
+  | "stage_started"
+  | "stage_executor_completed"
+  | "stage_verified"
+  | "run_completed"
+  | "resume_requested";
 
 export interface RunEvent {
   at: string;
   type: RunEventType;
   message: string;
+  stageId?: string;
 }
 
 export interface RunState {
@@ -87,6 +95,37 @@ export interface RunState {
   artifactPath: string;
   stages: RunStageState[];
   events: RunEvent[];
+}
+
+export interface StageExecutionContext {
+  projectRoot: string;
+  runState: RunState;
+  stage: RunStageState;
+  stageReportPath: string;
+  executorEvidencePath: string;
+}
+
+export interface StageExecutionResult {
+  stageReportPath: string;
+  evidencePath: string;
+}
+
+export interface StageVerificationContext {
+  projectRoot: string;
+  runState: RunState;
+  stage: RunStageState;
+  stageReportPath: string;
+  verifierEvidencePath: string;
+}
+
+export interface StageVerificationResult {
+  accepted: boolean;
+  evidencePath: string;
+}
+
+export interface WorkflowRuntimeAdapter {
+  executeStage(context: StageExecutionContext): Promise<StageExecutionResult>;
+  verifyStage(context: StageVerificationContext): Promise<StageVerificationResult>;
 }
 
 export interface GraphNode {

@@ -49,6 +49,14 @@ function parseRunId(stdout) {
   return match[1];
 }
 
+async function readRunState(cwd, runId) {
+  return JSON.parse(await readFile(path.join(cwd, ".agentmatrix", "runs", runId, "run.json"), "utf8"));
+}
+
+async function readProjectJson(cwd, relativePath) {
+  return JSON.parse(await readFile(path.join(cwd, relativePath), "utf8"));
+}
+
 test("help output lists the supported MVP verbs", async () => {
   const cwd = await tempProject();
   const result = await runCli(["--help"], cwd);
@@ -137,7 +145,7 @@ test("init copies an editable mr-preflight workflow with complete stage contract
   assert.deepEqual(config.availableResources.mcpResources, []);
 });
 
-test("run always creates a fresh filesystem-backed run", async () => {
+test("run always creates a fresh completed filesystem-backed run", async () => {
   const cwd = await tempProject();
   assert.equal((await runCli(["init"], cwd)).code, 0);
 
@@ -154,19 +162,75 @@ test("run always creates a fresh filesystem-backed run", async () => {
   const runIds = await readdir(path.join(cwd, ".agentmatrix", "runs"));
   assert.equal(runIds.length, 2);
 
-  const runState = JSON.parse(
-    await readFile(path.join(cwd, ".agentmatrix", "runs", firstRunId, "run.json"), "utf8")
-  );
+  const runState = await readRunState(cwd, firstRunId);
   assert.equal(runState.workflowId, "mr-preflight");
+  assert.equal(runState.status, "success");
   assert.deepEqual(
     runState.stages.map((stage) => [stage.id, stage.status]),
     [
-      ["static_check", "pending"],
-      ["test_check", "pending"],
-      ["code_review", "pending"],
-      ["mr_prepare", "pending"]
+      ["static_check", "success"],
+      ["test_check", "success"],
+      ["code_review", "success"],
+      ["mr_prepare", "success"]
     ]
   );
+});
+
+test("run executes mr-preflight stages with mock executor and verifier evidence", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const run = await runCli(["run"], cwd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /Completed run/);
+
+  const runId = parseRunId(run.stdout);
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.status, "success");
+  assert.deepEqual(
+    runState.events.map((event) => [event.type, event.stageId ?? null]),
+    [
+      ["run_created", null],
+      ["run_started", null],
+      ["stage_started", "static_check"],
+      ["stage_executor_completed", "static_check"],
+      ["stage_verified", "static_check"],
+      ["stage_started", "test_check"],
+      ["stage_executor_completed", "test_check"],
+      ["stage_verified", "test_check"],
+      ["stage_started", "code_review"],
+      ["stage_executor_completed", "code_review"],
+      ["stage_verified", "code_review"],
+      ["stage_started", "mr_prepare"],
+      ["stage_executor_completed", "mr_prepare"],
+      ["stage_verified", "mr_prepare"],
+      ["run_completed", null]
+    ]
+  );
+
+  for (const stage of runState.stages) {
+    assert.equal(stage.status, "success");
+    assert.equal(stage.artifacts.length, 1);
+    assert.equal(stage.evidence.length, 2);
+
+    const stageReport = await readProjectJson(cwd, stage.artifacts[0]);
+    assert.equal(stageReport.stage_id, stage.id);
+    assert.equal(stageReport.status, "success");
+    assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
+    assert.deepEqual(stageReport.skipped, []);
+    assert.deepEqual(stageReport.changed_files, []);
+
+    const executorEvidence = await readProjectJson(cwd, stage.evidence[0]);
+    assert.equal(executorEvidence.stage_id, stage.id);
+    assert.equal(executorEvidence.agent_role, stage.agentRole);
+    assert.equal(executorEvidence.status, "success");
+
+    const verifierEvidence = await readProjectJson(cwd, stage.evidence[1]);
+    assert.equal(verifierEvidence.stage_id, stage.id);
+    assert.equal(verifierEvidence.verifier_role, stage.verifierRole);
+    assert.equal(verifierEvidence.accepted, true);
+    assert.equal(verifierEvidence.checked_artifact, stage.artifacts[0]);
+  }
 });
 
 test("run validates edited workflow before creating a run", async () => {
@@ -333,7 +397,7 @@ test("resume, status, and visualize expose run state", async () => {
   const status = await runCli(["status"], cwd);
   assert.equal(status.code, 0, status.stderr);
   assert.match(status.stdout, new RegExp(runId));
-  assert.match(status.stdout, /pending/);
+  assert.match(status.stdout, /success/);
 
   const resume = await runCli(["resume", runId], cwd);
   assert.equal(resume.code, 0, resume.stderr);
@@ -352,10 +416,10 @@ test("resume, status, and visualize expose run state", async () => {
   assert.deepEqual(
     graph.nodes.map((node) => [node.id, node.status]),
     [
-      ["static_check", "pending"],
-      ["test_check", "pending"],
-      ["code_review", "pending"],
-      ["mr_prepare", "pending"]
+      ["static_check", "success"],
+      ["test_check", "success"],
+      ["code_review", "success"],
+      ["mr_prepare", "success"]
     ]
   );
   assert.deepEqual(graph.edges, [

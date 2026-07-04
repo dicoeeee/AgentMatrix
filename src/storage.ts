@@ -157,16 +157,27 @@ export async function resumeRun(
   const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
   const workflow = await loadWorkflow(paths.projectRoot, runState.workflowId);
   await assertWorkflowResourcesAvailable(workflow, options.resourceProvider ?? (await loadProjectResourceProvider(paths)));
-  const now = new Date().toISOString();
+  assertRunResumable(runState);
+  if (!options.runtimeAdapter) {
+    throw new AgentMatrixError("Workflow execution adapter is not configured.");
+  }
 
-  runState.updatedAt = now;
+  updateRun(runState, "running");
   runState.events.push({
-    at: now,
+    at: runState.updatedAt,
     type: "resume_requested",
-    message: "Resume requested; execution adapters are not implemented in this foundation slice."
+    message: "Resume requested; continuing workflow run."
   });
-
   await writeRun(paths.projectRoot, runState);
+
+  await executeStages(
+    paths.projectRoot,
+    runState,
+    options.runtimeAdapter,
+    (stage) => stage.status !== "success" && stage.status !== "skipped"
+  );
+  await completeRun(paths.projectRoot, runState, "Workflow run completed after resume.");
+
   return runState;
 }
 
@@ -247,20 +258,36 @@ async function executeFreshRun(
   });
   await writeRun(projectRoot, runState);
 
+  await executeStages(projectRoot, runState, runtimeAdapter, () => true);
+  await completeRun(projectRoot, runState, "Fresh workflow run completed.");
+
+  return runState;
+}
+
+async function executeStages(
+  projectRoot: string,
+  runState: RunState,
+  runtimeAdapter: WorkflowRuntimeAdapter,
+  shouldExecuteStage: (stage: RunStageState) => boolean
+) {
   for (const stage of runState.stages) {
+    if (!shouldExecuteStage(stage)) {
+      continue;
+    }
+
     assertDependenciesSuccessful(runState, stage);
     await executeStage(projectRoot, runState, stage, runtimeAdapter);
   }
+}
 
+async function completeRun(projectRoot: string, runState: RunState, message: string) {
   updateRun(runState, "success");
   runState.events.push({
     at: runState.updatedAt,
     type: "run_completed",
-    message: "Fresh workflow run completed."
+    message
   });
   await writeRun(projectRoot, runState);
-
-  return runState;
 }
 
 async function executeStage(
@@ -553,6 +580,14 @@ function assertDependenciesSuccessful(runState: RunState, stage: RunStageState) 
   }
 }
 
+function assertRunResumable(runState: RunState) {
+  if (runState.status === "pending" || runState.status === "running" || runState.status === "failed") {
+    return;
+  }
+
+  throw new AgentMatrixError(`Run "${runState.id}" is not resumable because its status is "${runState.status}".`);
+}
+
 function stageReportArtifactPath(runState: RunState, stage: RunStageState) {
   return outputArtifactPath(runState, stage, "stage_report");
 }
@@ -636,7 +671,9 @@ async function readProjectConfig(configPath: string): Promise<ProjectConfig> {
 
 async function readLatestResumableRun(projectRoot: string): Promise<RunState> {
   const runs = await readRuns(projectRoot);
-  const run = runs.find((candidate) => candidate.status === "pending" || candidate.status === "running");
+  const run = runs.find(
+    (candidate) => candidate.status === "pending" || candidate.status === "running" || candidate.status === "failed"
+  );
 
   if (!run) {
     throw new AgentMatrixError("No resumable runs found.");

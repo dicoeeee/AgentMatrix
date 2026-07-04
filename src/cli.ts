@@ -13,7 +13,7 @@ import {
   validateWorkflowFile
 } from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
-import { AGENTMATRIX_DIR } from "./types.js";
+import { AGENTMATRIX_DIR, type RunState, type StageFailureMetadata } from "./types.js";
 import { runToGraph, runToMermaid } from "./visualize.js";
 
 interface CliIo {
@@ -155,9 +155,11 @@ async function handleRun(projectRoot: string, args: string[], io: CliIo) {
 
 async function handleResume(projectRoot: string, args: string[], io: CliIo) {
   const runId = parseOptionalPositional(args, "resume", "run-id");
-  const runState = await resumeRun(projectRoot, runId);
+  const runState = await resumeRun(projectRoot, runId, { runtimeAdapter: createMockRuntimeAdapter() });
   io.stdout.write(`Resumed run ${runState.id}\n`);
-  io.stdout.write("Execution adapters are not implemented in this foundation slice.\n");
+  if (runState.status === "success") {
+    io.stdout.write(`Completed run ${runState.id}\n`);
+  }
 }
 
 async function handleStatus(projectRoot: string, args: string[], io: CliIo) {
@@ -345,16 +347,51 @@ function rejectUnexpectedPositional(token: string, command: string) {
   throw new CliUsageError(`Command "${command}" does not accept positional argument "${token}".`);
 }
 
-function formatRuns(runs: Awaited<ReturnType<typeof readRuns>>) {
+function formatRuns(runs: RunState[]) {
   const rows = [
-    ["Run ID", "Workflow", "Status", "Updated"],
-    ...runs.map((run) => [run.id, run.workflowId, run.status, run.updatedAt])
+    ["Run ID", "Workflow", "Status", "Stages", "Failure", "Updated"],
+    ...runs.map((run) => [
+      run.id,
+      run.workflowId,
+      run.status,
+      formatStageStatuses(run),
+      formatRunFailure(run),
+      run.updatedAt
+    ])
   ];
   const widths = rows[0].map((_, columnIndex) =>
     Math.max(...rows.map((row) => row[columnIndex].length))
   );
 
   return `${rows.map((row) => row.map((cell, index) => cell.padEnd(widths[index])).join("  ")).join("\n")}\n`;
+}
+
+function formatStageStatuses(run: RunState) {
+  return run.stages.map((stage) => `${stage.id}=${stage.status}`).join(", ");
+}
+
+function formatRunFailure(run: RunState) {
+  const failedStage = run.stages.find((stage) => stage.failure);
+  if (!failedStage?.failure) {
+    return "";
+  }
+
+  return `${failedStage.id} ${formatFailure(failedStage.failure)}`;
+}
+
+function formatFailure(failure: StageFailureMetadata) {
+  const metadata = formatFailureMetadata(failure.metadata);
+  return `${failure.kind}: ${failure.message}${metadata ? ` (${metadata})` : ""}`;
+}
+
+function formatFailureMetadata(metadata: StageFailureMetadata["metadata"]) {
+  if (!metadata) {
+    return "";
+  }
+
+  return Object.entries(metadata)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(", ");
 }
 
 function normalizeError(error: unknown) {

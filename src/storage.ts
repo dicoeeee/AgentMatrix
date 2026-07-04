@@ -20,6 +20,7 @@ import {
   AGENTMATRIX_DIR,
   type RunStageState,
   type RunState,
+  type RerunTrigger,
   type StageExecutionContext,
   type StageFailureMetadata,
   type StageVerificationContext,
@@ -170,12 +171,7 @@ export async function resumeRun(
   });
   await writeRun(paths.projectRoot, runState);
 
-  await executeStages(
-    paths.projectRoot,
-    runState,
-    options.runtimeAdapter,
-    (stage) => stage.status !== "success" && stage.status !== "skipped"
-  );
+  await executeStages(paths.projectRoot, runState, options.runtimeAdapter);
   await completeRun(paths.projectRoot, runState, "Workflow run completed after resume.");
 
   return runState;
@@ -258,7 +254,7 @@ async function executeFreshRun(
   });
   await writeRun(projectRoot, runState);
 
-  await executeStages(projectRoot, runState, runtimeAdapter, () => true);
+  await executeStages(projectRoot, runState, runtimeAdapter);
   await completeRun(projectRoot, runState, "Fresh workflow run completed.");
 
   return runState;
@@ -267,14 +263,13 @@ async function executeFreshRun(
 async function executeStages(
   projectRoot: string,
   runState: RunState,
-  runtimeAdapter: WorkflowRuntimeAdapter,
-  shouldExecuteStage: (stage: RunStageState) => boolean
+  runtimeAdapter: WorkflowRuntimeAdapter
 ) {
-  for (const stage of runState.stages) {
-    if (!shouldExecuteStage(stage)) {
-      continue;
+  while (true) {
+    const stage = runState.stages.find((candidate) => !isStageComplete(candidate));
+    if (!stage) {
+      return;
     }
-
     assertDependenciesSuccessful(runState, stage);
     await executeStage(projectRoot, runState, stage, runtimeAdapter);
   }
@@ -296,6 +291,9 @@ async function executeStage(
   stage: RunStageState,
   runtimeAdapter: WorkflowRuntimeAdapter
 ) {
+  const previouslySuccessfulStageIds = new Set(
+    runState.stages.filter((candidate) => candidate.status === "success").map((candidate) => candidate.id)
+  );
   updateStage(runState, stage, "running");
   runState.events.push({
     at: runState.updatedAt,
@@ -387,6 +385,7 @@ async function executeStage(
     stageId: stage.id,
     message: `Verifier ${stage.verifierRole} accepted stage ${stage.id}.`
   });
+  invalidateStaleStages(runState, stageReport, previouslySuccessfulStageIds);
   await writeRun(projectRoot, runState);
 }
 
@@ -571,6 +570,153 @@ async function failStage(
   await writeRun(projectRoot, runState);
 }
 
+function invalidateStaleStages(
+  runState: RunState,
+  stageReport: StageReport,
+  previouslySuccessfulStageIds: Set<string>
+) {
+  const changedFiles = normalizePathList(stageReport.changed_files);
+  const changedArtifacts = changedArtifactPathList(runState, stageReport.changed_artifacts ?? []);
+
+  if (changedFiles.length === 0 && changedArtifacts.length === 0) {
+    return;
+  }
+
+  const invalidatedStageIds = new Set<string>();
+
+  for (const stage of runState.stages) {
+    if (!previouslySuccessfulStageIds.has(stage.id)) {
+      continue;
+    }
+
+    if (rerunTriggersMatch(stage.rerunWhen, changedFiles, changedArtifacts)) {
+      markStagePending(runState, stage);
+      invalidatedStageIds.add(stage.id);
+    }
+  }
+
+  propagatePendingToDependents(runState, invalidatedStageIds);
+}
+
+function propagatePendingToDependents(runState: RunState, invalidatedStageIds: Set<string>) {
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (const stage of runState.stages) {
+      if (stage.status !== "success" || invalidatedStageIds.has(stage.id)) {
+        continue;
+      }
+
+      if (stage.dependsOn.some((dependencyId) => invalidatedStageIds.has(dependencyId))) {
+        markStagePending(runState, stage);
+        invalidatedStageIds.add(stage.id);
+        changed = true;
+      }
+    }
+  }
+}
+
+function markStagePending(runState: RunState, stage: RunStageState) {
+  updateStage(runState, stage, "pending");
+  stage.evidence = [];
+  stage.artifacts = [];
+}
+
+function rerunTriggersMatch(triggers: RerunTrigger[], changedFiles: string[], changedArtifacts: string[]) {
+  return triggers.some((trigger) => {
+    const candidates = trigger.type === "changed_files" ? changedFiles : changedArtifacts;
+    const patterns = trigger.type === "changed_files" ? trigger.paths : trigger.artifacts;
+    return candidates.some((candidate) => patterns.some((pattern) => pathPatternMatches(pattern, candidate)));
+  });
+}
+
+function changedArtifactPathList(runState: RunState, changedArtifacts: string[]) {
+  const artifactRoot = normalizeWorkflowPath(runState.artifactPath);
+  const paths = new Set<string>();
+
+  for (const artifact of changedArtifacts) {
+    const normalized = normalizeWorkflowPath(artifact);
+    if (!normalized) {
+      continue;
+    }
+
+    paths.add(normalized);
+    if (artifactRoot && normalized.startsWith(`${artifactRoot}/`)) {
+      paths.add(normalized.slice(artifactRoot.length + 1));
+    }
+  }
+
+  return [...paths];
+}
+
+function normalizePathList(paths: string[]) {
+  return [...new Set(paths.map(normalizeWorkflowPath).filter(Boolean))];
+}
+
+function normalizeWorkflowPath(value: string) {
+  return value.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/");
+}
+
+function pathPatternMatches(pattern: string, candidate: string) {
+  const normalizedPattern = normalizeWorkflowPath(pattern);
+  const normalizedCandidate = normalizeWorkflowPath(candidate);
+
+  if (!normalizedPattern || !normalizedCandidate) {
+    return false;
+  }
+
+  if (hasUnsupportedGlobSyntax(normalizedPattern)) {
+    return true;
+  }
+
+  if (!hasGlobSyntax(normalizedPattern)) {
+    const directoryPattern = normalizedPattern.replace(/\/+$/, "");
+    return normalizedCandidate === normalizedPattern || normalizedCandidate.startsWith(`${directoryPattern}/`);
+  }
+
+  return globToRegExp(normalizedPattern).test(normalizedCandidate);
+}
+
+function hasGlobSyntax(pattern: string) {
+  return pattern.includes("*");
+}
+
+function hasUnsupportedGlobSyntax(pattern: string) {
+  return /[\[\]{}?!]/.test(pattern);
+}
+
+function globToRegExp(pattern: string) {
+  let source = "^";
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+
+    if (character === "*") {
+      if (pattern[index + 1] === "*") {
+        if (pattern[index + 2] === "/") {
+          source += "(?:.*/)?";
+          index += 2;
+        } else {
+          source += ".*";
+          index += 1;
+        }
+      } else {
+        source += "[^/]*";
+      }
+      continue;
+    }
+
+    source += escapeRegExp(character);
+  }
+
+  return new RegExp(`${source}$`);
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
 function assertDependenciesSuccessful(runState: RunState, stage: RunStageState) {
   for (const dependencyId of stage.dependsOn) {
     const dependency = runState.stages.find((candidate) => candidate.id === dependencyId);
@@ -578,6 +724,10 @@ function assertDependenciesSuccessful(runState: RunState, stage: RunStageState) 
       throw new AgentMatrixError(`Stage "${stage.id}" cannot start before dependency "${dependencyId}" succeeds.`);
     }
   }
+}
+
+function isStageComplete(stage: RunStageState) {
+  return stage.status === "success" || stage.status === "skipped";
 }
 
 function assertRunResumable(runState: RunState) {

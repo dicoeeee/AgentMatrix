@@ -35,6 +35,7 @@ export interface StageReport {
   artifacts: string[];
   skipped: StageReportSkippedItem[];
   changed_files: string[];
+  changed_artifacts?: string[];
   blockers?: StageReportBlocker[];
   skip_reason?: string;
 }
@@ -130,6 +131,13 @@ const STAGE_REPORT_SCHEMA: AnySchema = {
       }
     },
     changed_files: {
+      type: "array",
+      items: {
+        type: "string",
+        minLength: 1
+      }
+    },
+    changed_artifacts: {
       type: "array",
       items: {
         type: "string",

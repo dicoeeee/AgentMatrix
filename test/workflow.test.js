@@ -65,7 +65,8 @@ test("parseWorkflow reads the editable mr-preflight stage contract", () => {
     { type: "output_exists", output: "stage_report" },
     { type: "schema_valid", output: "stage_report", schema: "stage_report" },
     { type: "commands_ok" },
-    { type: "no_blockers" }
+    { type: "no_blockers" },
+    { type: "skip_reason_present" }
   ]);
   assert.deepEqual(staticCheck.repairPolicy, {
     allowRepair: true,

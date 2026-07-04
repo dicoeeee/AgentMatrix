@@ -209,8 +209,9 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
   );
 
   for (const stage of runState.stages) {
+    const expectedArtifacts = stage.id === "mr_prepare" ? 3 : 1;
     assert.equal(stage.status, "success");
-    assert.equal(stage.artifacts.length, 1);
+    assert.equal(stage.artifacts.length, expectedArtifacts);
     assert.equal(stage.evidence.length, 2);
 
     const stageReport = await readProjectJson(cwd, stage.artifacts[0]);
@@ -219,6 +220,7 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
     assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
     assert.deepEqual(stageReport.skipped, []);
     assert.deepEqual(stageReport.changed_files, []);
+    assert.deepEqual(stageReport.blockers, []);
 
     const executorEvidence = await readProjectJson(cwd, stage.evidence[0]);
     assert.equal(executorEvidence.stage_id, stage.id);

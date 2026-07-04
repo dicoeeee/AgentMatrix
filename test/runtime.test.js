@@ -64,6 +64,73 @@ function rejectingRuntimeAdapter() {
   };
 }
 
+function stageReport(overrides = {}) {
+  return {
+    schema_version: 1,
+    run_id: "placeholder",
+    stage_id: "placeholder",
+    status: "success",
+    summary: "Fixture stage report.",
+    commands: [],
+    findings: [],
+    artifacts: [],
+    skipped: [],
+    changed_files: [],
+    ...overrides
+  };
+}
+
+function reportingRuntimeAdapter(report) {
+  return {
+    async executeStage(context) {
+      await writeJson(context.projectRoot, context.executorEvidencePath, {
+        schema_version: 1,
+        run_id: context.runState.id,
+        stage_id: context.stage.id,
+        agent_role: context.stage.agentRole,
+        status: "success"
+      });
+      await writeJson(context.projectRoot, context.stageReportPath, {
+        ...report,
+        run_id: context.runState.id,
+        stage_id: context.stage.id
+      });
+
+      return {
+        stageReportPath: context.stageReportPath,
+        evidencePath: context.executorEvidencePath
+      };
+    },
+    async verifyStage(context) {
+      await writeJson(context.projectRoot, context.verifierEvidencePath, {
+        schema_version: 1,
+        run_id: context.runState.id,
+        stage_id: context.stage.id,
+        verifier_role: context.stage.verifierRole,
+        accepted: true,
+        checked_artifact: context.stageReportPath
+      });
+
+      return {
+        accepted: true,
+        evidencePath: context.verifierEvidencePath
+      };
+    }
+  };
+}
+
+async function createRejectedRun(report, expectedMessage) {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+
+  await assert.rejects(
+    () => createRun(cwd, "mr-preflight", { runtimeAdapter: reportingRuntimeAdapter(report) }),
+    expectedMessage
+  );
+
+  return readRuns(cwd);
+}
+
 test("runtime stops before the next stage when verifier rejects evidence", async () => {
   const cwd = await tempProject();
   await initializeProject(cwd);
@@ -94,4 +161,72 @@ test("runtime stops before the next stage when verifier rejects evidence", async
       ["stage_verified", "static_check"]
     ]
   );
+  assert.equal(runState.stages[0].failure.kind, "verifier_failure");
+});
+
+test("runtime fails a stage when the stage report violates the built-in schema", async () => {
+  const invalidReport = stageReport();
+  delete invalidReport.commands;
+
+  const [runState] = await createRejectedRun(invalidReport, /stage_report.*commands/);
+
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+  assert.equal(runState.stages[0].failure.kind, "schema_failure");
+  assert.match(runState.stages[0].failure.message, /commands/);
+  assert.equal(runState.stages[1].status, "pending");
+});
+
+test("runtime fails a stage when commands_ok sees a failed command", async () => {
+  const [runState] = await createRejectedRun(
+    stageReport({
+      commands: [{ command: "npm test", status: "failed", exit_code: 1 }]
+    }),
+    /command failed/
+  );
+
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+  assert.equal(runState.stages[0].failure.kind, "command_failure");
+  assert.deepEqual(runState.stages[0].failure.metadata, {
+    command: "npm test",
+    exitCode: 1
+  });
+});
+
+for (const [blockerType, failureKind] of [
+  ["missing_resource", "missing_resource"],
+  ["human_required", "human_required_blocker"],
+  ["external_required", "external_required_blocker"]
+]) {
+  test(`runtime records ${failureKind} metadata from blockers`, async () => {
+    const [runState] = await createRejectedRun(
+      stageReport({
+        blockers: [{ type: blockerType, message: `${blockerType} fixture` }]
+      }),
+      /blocker/
+    );
+
+    assert.equal(runState.status, "failed");
+    assert.equal(runState.stages[0].status, "failed");
+    assert.equal(runState.stages[0].failure.kind, failureKind);
+    assert.deepEqual(runState.stages[0].failure.metadata, {
+      blockerType,
+      blockerMessage: `${blockerType} fixture`
+    });
+  });
+}
+
+test("runtime rejects skipped stage reports without a skip reason", async () => {
+  const [runState] = await createRejectedRun(
+    stageReport({
+      status: "skipped",
+      skipped: []
+    }),
+    /skip reason/
+  );
+
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+  assert.equal(runState.stages[0].failure.kind, "schema_failure");
 });

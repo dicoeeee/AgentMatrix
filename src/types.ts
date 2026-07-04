@@ -4,6 +4,14 @@ export const AGENTMATRIX_DIR = ".agentmatrix";
 
 export type StageStatus = "pending" | "running" | "success" | "failed" | "skipped";
 export type RunStatus = "pending" | "running" | "success" | "failed";
+export type StageFailureKind =
+  | "command_failure"
+  | "verifier_failure"
+  | "missing_resource"
+  | "human_required_blocker"
+  | "external_required_blocker"
+  | "schema_failure"
+  | "stage_report_failure";
 
 export interface StageDefinitionFields {
   id: string;
@@ -66,6 +74,13 @@ export interface RunStageState extends StageDefinitionFields {
   status: StageStatus;
   evidence: string[];
   artifacts: string[];
+  failure?: StageFailureMetadata;
+}
+
+export interface StageFailureMetadata {
+  kind: StageFailureKind;
+  message: string;
+  metadata?: Record<string, unknown>;
 }
 
 export type RunEventType =

@@ -21,10 +21,20 @@ import {
   type RunStageState,
   type RunState,
   type StageExecutionContext,
+  type StageFailureMetadata,
   type StageVerificationContext,
   type WorkflowDefinition,
   type WorkflowRuntimeAdapter
 } from "./types.js";
+import {
+  failedCommand,
+  firstBlocker,
+  hasSkipReason,
+  parseStageReport,
+  type StageReport,
+  type StageReportBlocker,
+  type StageReportCommand
+} from "./stage-report.js";
 import { parseWorkflow } from "./workflow.js";
 
 const CONFIG_FILE = "config.json";
@@ -281,7 +291,7 @@ async function executeStage(
 
   const execution = await runtimeAdapter.executeStage(executionContext);
 
-  stage.artifacts = [execution.stageReportPath];
+  stage.artifacts = await existingStageOutputPaths(projectRoot, runState, stage);
   stage.evidence = [execution.evidencePath];
   touchRun(runState);
   runState.events.push({
@@ -292,19 +302,47 @@ async function executeStage(
   });
   await writeRun(projectRoot, runState);
 
+  let stageReport: StageReport;
+  try {
+    stageReport = await readStageReport(projectRoot, stageReportPath);
+    assertStageReportMatchesRun(stageReport, runState, stage, stageReportPath);
+  } catch (error) {
+    const failure = schemaFailure(error);
+    await failStage(projectRoot, runState, stage, failure);
+    throw new AgentMatrixError(failure.message);
+  }
+
+  const completionFailure =
+    (await completionCriteriaFailure(projectRoot, runState, stage, stageReport)) ??
+    skippedReportFailure(stage, stageReport) ??
+    failedReportStatusFailure(stage, stageReport);
+
+  if (completionFailure) {
+    await failStage(projectRoot, runState, stage, completionFailure);
+    throw new AgentMatrixError(completionFailure.message);
+  }
+
   const verificationContext: StageVerificationContext = {
     projectRoot,
     runState,
     stage,
-    stageReportPath: execution.stageReportPath,
+    stageReportPath,
     verifierEvidencePath
   };
   const verification = await runtimeAdapter.verifyStage(verificationContext);
 
   stage.evidence.push(verification.evidencePath);
   if (!verification.accepted) {
-    updateStage(runState, stage, "failed");
-    runState.status = "failed";
+    const failure: StageFailureMetadata = {
+      kind: "verifier_failure",
+      message: `Verifier ${stage.verifierRole} rejected stage "${stage.id}".`,
+      metadata: {
+        verifierRole: stage.verifierRole,
+        evidencePath: verification.evidencePath
+      }
+    };
+    updateStage(runState, stage, "failed", failure);
+    updateRun(runState, "failed");
     runState.events.push({
       at: runState.updatedAt,
       type: "stage_verified",
@@ -312,10 +350,10 @@ async function executeStage(
       message: `Verifier ${stage.verifierRole} rejected stage ${stage.id}.`
     });
     await writeRun(projectRoot, runState);
-    throw new AgentMatrixError(`Verifier ${stage.verifierRole} rejected stage "${stage.id}".`);
+    throw new AgentMatrixError(failure.message);
   }
 
-  updateStage(runState, stage, "success");
+  updateStage(runState, stage, stageReport.status === "skipped" ? "skipped" : "success");
   runState.events.push({
     at: runState.updatedAt,
     type: "stage_verified",
@@ -325,30 +363,242 @@ async function executeStage(
   await writeRun(projectRoot, runState);
 }
 
+async function readStageReport(projectRoot: string, relativePath: string): Promise<StageReport> {
+  try {
+    return parseStageReport(await readFile(path.join(projectRoot, relativePath), "utf8"), relativePath);
+  } catch (error) {
+    if (error instanceof AgentMatrixError) {
+      throw error;
+    }
+
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AgentMatrixError(
+      `Stage report ${relativePath} is missing or unreadable for stage_report schema: ${detail}`
+    );
+  }
+}
+
+function assertStageReportMatchesRun(
+  report: StageReport,
+  runState: RunState,
+  stage: RunStageState,
+  label: string
+) {
+  if (report.run_id !== runState.id) {
+    throw new AgentMatrixError(
+      `Stage report ${label} failed stage_report schema: run_id must be "${runState.id}".`
+    );
+  }
+
+  if (report.stage_id !== stage.id) {
+    throw new AgentMatrixError(
+      `Stage report ${label} failed stage_report schema: stage_id must be "${stage.id}".`
+    );
+  }
+}
+
+async function completionCriteriaFailure(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  stageReport: StageReport
+): Promise<StageFailureMetadata | undefined> {
+  for (const criterion of stage.completionCriteria) {
+    if (criterion.type === "output_exists") {
+      const outputPath = outputArtifactPath(runState, stage, criterion.output);
+      if (!(await pathExists(path.join(projectRoot, outputPath)))) {
+        return {
+          kind: "missing_resource",
+          message: `Stage "${stage.id}" required output "${criterion.output}" is missing at ${outputPath}.`,
+          metadata: {
+            output: criterion.output,
+            path: outputPath
+          }
+        };
+      }
+      continue;
+    }
+
+    if (criterion.type === "schema_valid") {
+      const outputPath = outputArtifactPath(runState, stage, criterion.output);
+      try {
+        if (criterion.schema === "stage_report") {
+          const report =
+            criterion.output === "stage_report"
+              ? stageReport
+              : await readStageReport(projectRoot, outputPath);
+          assertStageReportMatchesRun(report, runState, stage, outputPath);
+        }
+      } catch (error) {
+        return schemaFailure(error);
+      }
+      continue;
+    }
+
+    if (criterion.type === "commands_ok") {
+      const command = failedCommand(stageReport);
+      if (command) {
+        return commandFailure(stage, command);
+      }
+      continue;
+    }
+
+    if (criterion.type === "no_blockers") {
+      const blocker = firstBlocker(stageReport);
+      if (blocker) {
+        return blockerFailure(stage, blocker);
+      }
+      continue;
+    }
+
+    if (criterion.type === "skip_reason_present") {
+      const failure = skippedReportFailure(stage, stageReport);
+      if (failure) {
+        return failure;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function commandFailure(stage: RunStageState, command: StageReportCommand): StageFailureMetadata {
+  const message = `Stage "${stage.id}" command failed: ${command.command}.`;
+
+  return {
+    kind: "command_failure",
+    message,
+    metadata: {
+      command: command.command,
+      ...(command.exit_code === undefined ? {} : { exitCode: command.exit_code })
+    }
+  };
+}
+
+function blockerFailure(stage: RunStageState, blocker: StageReportBlocker): StageFailureMetadata {
+  const kindByBlockerType = {
+    missing_resource: "missing_resource",
+    human_required: "human_required_blocker",
+    external_required: "external_required_blocker"
+  } as const;
+
+  return {
+    kind: kindByBlockerType[blocker.type],
+    message: `Stage "${stage.id}" reported blocker: ${blocker.message}.`,
+    metadata: {
+      blockerType: blocker.type,
+      blockerMessage: blocker.message,
+      ...(blocker.resource ? { resource: blocker.resource } : {})
+    }
+  };
+}
+
+function skippedReportFailure(stage: RunStageState, stageReport: StageReport): StageFailureMetadata | undefined {
+  if (stageReport.status !== "skipped" || hasSkipReason(stageReport)) {
+    return undefined;
+  }
+
+  return {
+    kind: "schema_failure",
+    message: `Stage "${stage.id}" reported skipped without a skip reason.`
+  };
+}
+
+function failedReportStatusFailure(stage: RunStageState, stageReport: StageReport): StageFailureMetadata | undefined {
+  if (stageReport.status !== "failed") {
+    return undefined;
+  }
+
+  const command = failedCommand(stageReport);
+  if (command) {
+    return commandFailure(stage, command);
+  }
+
+  const blocker = firstBlocker(stageReport);
+  if (blocker) {
+    return blockerFailure(stage, blocker);
+  }
+
+  return {
+    kind: "stage_report_failure",
+    message: `Stage "${stage.id}" reported failed.`
+  };
+}
+
+function schemaFailure(error: unknown): StageFailureMetadata {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    kind: "schema_failure",
+    message
+  };
+}
+
+async function failStage(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  failure: StageFailureMetadata
+) {
+  updateStage(runState, stage, "failed", failure);
+  updateRun(runState, "failed");
+  await writeRun(projectRoot, runState);
+}
+
 function assertDependenciesSuccessful(runState: RunState, stage: RunStageState) {
   for (const dependencyId of stage.dependsOn) {
     const dependency = runState.stages.find((candidate) => candidate.id === dependencyId);
-    if (!dependency || dependency.status !== "success") {
+    if (!dependency || (dependency.status !== "success" && dependency.status !== "skipped")) {
       throw new AgentMatrixError(`Stage "${stage.id}" cannot start before dependency "${dependencyId}" succeeds.`);
     }
   }
 }
 
 function stageReportArtifactPath(runState: RunState, stage: RunStageState) {
-  const stageReport = stage.outputs.find((output) => output.id === "stage_report");
-  if (!stageReport) {
-    throw new AgentMatrixError(`Stage "${stage.id}" does not declare a stage_report output.`);
+  return outputArtifactPath(runState, stage, "stage_report");
+}
+
+function outputArtifactPath(runState: RunState, stage: RunStageState, outputId?: string) {
+  if (!outputId) {
+    throw new AgentMatrixError(`Stage "${stage.id}" completion criterion is missing an output id.`);
   }
 
-  return path.join(runState.artifactPath, stageReport.path);
+  const output = stage.outputs.find((candidate) => candidate.id === outputId);
+  if (!output) {
+    throw new AgentMatrixError(`Stage "${stage.id}" does not declare output "${outputId}".`);
+  }
+
+  return path.join(runState.artifactPath, output.path);
+}
+
+async function existingStageOutputPaths(projectRoot: string, runState: RunState, stage: RunStageState) {
+  const outputPaths: string[] = [];
+
+  for (const output of stage.outputs) {
+    const outputPath = path.join(runState.artifactPath, output.path);
+    if (await pathExists(path.join(projectRoot, outputPath))) {
+      outputPaths.push(outputPath);
+    }
+  }
+
+  return outputPaths;
 }
 
 function artifactPath(runState: RunState, stageId: string, fileName: string) {
   return path.join(runState.artifactPath, stageId, fileName);
 }
 
-function updateStage(runState: RunState, stage: RunStageState, status: RunStageState["status"]) {
+function updateStage(
+  runState: RunState,
+  stage: RunStageState,
+  status: RunStageState["status"],
+  failure?: StageFailureMetadata
+) {
   stage.status = status;
+  if (failure) {
+    stage.failure = failure;
+  } else if (status !== "failed") {
+    delete stage.failure;
+  }
   touchRun(runState);
 }
 

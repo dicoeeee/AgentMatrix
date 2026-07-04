@@ -31,6 +31,7 @@ stages:
         schema: stage_report
       - type: commands_ok
       - type: no_blockers
+      - type: skip_reason_present
     repair_policy:
       allow_repair: true
       max_attempts: 1
@@ -71,6 +72,7 @@ stages:
         schema: stage_report
       - type: commands_ok
       - type: no_blockers
+      - type: skip_reason_present
     repair_policy:
       allow_repair: false
       max_attempts: 0
@@ -112,6 +114,7 @@ stages:
         output: stage_report
         schema: stage_report
       - type: no_blockers
+      - type: skip_reason_present
     repair_policy:
       allow_repair: false
       max_attempts: 0
@@ -169,6 +172,7 @@ stages:
         output: stage_report
         schema: stage_report
       - type: no_blockers
+      - type: skip_reason_present
     repair_policy:
       allow_repair: false
       max_attempts: 0

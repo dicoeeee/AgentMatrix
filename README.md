@@ -26,3 +26,5 @@ Supported MVP verbs are `init`, `run`, `resume`, `status`, and `visualize`.
 The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction.
 
 Workflow YAML is validated before run/resume paths use it. Validation errors include the workflow file location and the specific field path that needs attention.
+
+`run` and `resume` also check required resources before changing run state. Required agent roles, skills, and MCP resources are derived from the workflow, and the default project-local provider reads `.agentmatrix/config.json` `availableResources`. Missing resources fail early with a message naming the missing items and pointing users toward the existing installer capability; AgentMatrix does not auto-install resources.

@@ -155,6 +155,7 @@ function parseWorkflowStage(stageValue: unknown, index: number, sourceName: stri
   assertCompletionCriteria(completionCriteria, outputs, stagePath, sourceName);
   const repairPolicy = readRepairPolicy(stageValue.repair_policy, stagePath, sourceName);
   const rerunWhen = readRerunTriggers(stageValue.rerun_when, stagePath, sourceName);
+  const mcpResources = readStringArray(stageValue.mcp_resources ?? [], `${stagePath}.mcp_resources`, sourceName);
   const agentRole = readRole(stageValue, "agent_role", sourceName, `${stagePath}.agent_role`);
   const verifierRole = readRole(stageValue, "verifier_role", sourceName, `${stagePath}.verifier_role`);
   const skills = readStringArray(stageValue.skills, `${stagePath}.skills`, sourceName);
@@ -168,6 +169,7 @@ function parseWorkflowStage(stageValue: unknown, index: number, sourceName: stri
     completionCriteria,
     repairPolicy,
     rerunWhen,
+    mcpResources,
     agentRole,
     verifierRole,
     skills

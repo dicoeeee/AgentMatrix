@@ -119,6 +119,7 @@ test("init copies an editable mr-preflight workflow with complete stage contract
     assert.ok(Array.isArray(stage.completion_criteria), `${stage.id} should declare completion criteria`);
     assert.ok(stage.repair_policy, `${stage.id} should declare repair policy`);
     assert.ok(Array.isArray(stage.rerun_when), `${stage.id} should declare rerun triggers`);
+    assert.ok(Array.isArray(stage.mcp_resources), `${stage.id} should declare MCP resources`);
     assert.equal(typeof stage.agent_role, "string");
     assert.equal(typeof stage.verifier_role, "string");
     assert.ok(Array.isArray(stage.skills), `${stage.id} should declare platform-visible skills`);
@@ -128,6 +129,12 @@ test("init copies an editable mr-preflight workflow with complete stage contract
   const skillNames = workflow.stages.flatMap((stage) => stage.skills);
   assert.ok(skillNames.includes("static-check"));
   assert.ok(skillNames.includes("industry-code-review"));
+
+  const config = JSON.parse(await readFile(path.join(cwd, ".agentmatrix", "config.json"), "utf8"));
+  assert.ok(config.availableResources.agents.includes("static_check"));
+  assert.ok(config.availableResources.agents.includes("static_check_verifier"));
+  assert.ok(config.availableResources.skills.includes("static-check"));
+  assert.deepEqual(config.availableResources.mcpResources, []);
 });
 
 test("run always creates a fresh filesystem-backed run", async () => {
@@ -199,6 +206,46 @@ stages:
   assert.deepEqual(await readdir(path.join(cwd, ".agentmatrix", "runs")), []);
 });
 
+test("run checks required resources before creating a run", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const configPath = path.join(cwd, ".agentmatrix", "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.availableResources = {
+    agents: [
+      "test_check",
+      "test_check_verifier",
+      "code_review",
+      "code_review_verifier",
+      "mr_prepare",
+      "mr_prepare_verifier"
+    ],
+    skills: ["industry-code-review"],
+    mcpResources: []
+  };
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const workflow = await readFile(workflowPath, "utf8");
+  await writeFile(
+    workflowPath,
+    workflow.replace(
+      "    mcp_resources: []\n    agent_role: static_check",
+      "    mcp_resources:\n      - github\n    agent_role: static_check"
+    )
+  );
+
+  const result = await runCli(["run"], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Missing required resources/);
+  assert.match(result.stderr, /agent: static_check/);
+  assert.match(result.stderr, /skill: static-check/);
+  assert.match(result.stderr, /mcp_resource: github/);
+  assert.match(result.stderr, /installer/);
+  assert.deepEqual(await readdir(path.join(cwd, ".agentmatrix", "runs")), []);
+});
+
 test("resume validates the edited workflow before continuing a run", async () => {
   const cwd = await tempProject();
   assert.equal((await runCli(["init"], cwd)).code, 0);
@@ -212,6 +259,33 @@ test("resume validates the edited workflow before continuing a run", async () =>
   assert.equal(result.code, 1);
   assert.match(result.stderr, /mr-preflight\.workflow\.yml/);
   assert.match(result.stderr, /completion_criteria\[0\]\.type/);
+});
+
+test("resume checks required resources before mutating run state", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+  const runId = parseRunId((await runCli(["run"], cwd)).stdout);
+  const runPath = path.join(cwd, ".agentmatrix", "runs", runId, "run.json");
+  const before = JSON.parse(await readFile(runPath, "utf8"));
+
+  const configPath = path.join(cwd, ".agentmatrix", "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.availableResources = {
+    agents: before.stages
+      .flatMap((stage) => [stage.agentRole, stage.verifierRole])
+      .filter((role) => role !== "static_check_verifier"),
+    skills: before.stages.flatMap((stage) => stage.skills),
+    mcpResources: before.stages.flatMap((stage) => stage.mcpResources)
+  };
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
+
+  const result = await runCli(["resume", runId], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Missing required resources/);
+  assert.match(result.stderr, /agent: static_check_verifier/);
+
+  const after = JSON.parse(await readFile(runPath, "utf8"));
+  assert.deepEqual(after.events, before.events);
 });
 
 test("visualize validates the edited workflow before rendering run state", async () => {

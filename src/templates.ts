@@ -42,6 +42,7 @@ stages:
       - type: changed_artifacts
         artifacts:
           - static_check/stage-report.json
+    mcp_resources: []
     agent_role: static_check
     verifier_role: static_check_verifier
     skills:
@@ -82,6 +83,7 @@ stages:
         artifacts:
           - static_check/stage-report.json
           - test_check/stage-report.json
+    mcp_resources: []
     agent_role: test_check
     verifier_role: test_check_verifier
     skills: []
@@ -123,6 +125,7 @@ stages:
           - static_check/stage-report.json
           - test_check/stage-report.json
           - code_review/stage-report.json
+    mcp_resources: []
     agent_role: code_review
     verifier_role: code_review_verifier
     skills:
@@ -179,6 +182,7 @@ stages:
           - mr_prepare/stage-report.json
           - mr_prepare/title.md
           - mr_prepare/description.md
+    mcp_resources: []
     agent_role: mr_prepare
     verifier_role: mr_prepare_verifier
     skills: []

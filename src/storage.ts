@@ -4,6 +4,13 @@ import path from "node:path";
 
 import { AgentMatrixError } from "./errors.js";
 import {
+  assertWorkflowResourcesAvailable,
+  availableResourceProvider,
+  availableResourcesFromWorkflow,
+  normalizeAvailableResources,
+  type ResourceProvider
+} from "./resources.js";
+import {
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKFLOW_ID,
   DEFAULT_WORKFLOW_YAML,
@@ -21,9 +28,18 @@ export interface InitResult {
   workflowCreated: boolean;
 }
 
+export interface RuntimeOptions {
+  resourceProvider?: ResourceProvider;
+}
+
+interface ProjectConfig {
+  availableResources?: unknown;
+}
+
 export async function initializeProject(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<InitResult> {
   assertBuiltInWorkflow(workflowId);
   const paths = projectPaths(projectRoot);
+  const workflow = parseWorkflow(DEFAULT_WORKFLOW_YAML, DEFAULT_WORKFLOW_FILE);
 
   await mkdir(paths.workflowsDir, { recursive: true });
   await mkdir(paths.runsDir, { recursive: true });
@@ -37,7 +53,8 @@ export async function initializeProject(projectRoot: string, workflowId = DEFAUL
         defaultWorkflow: workflowId,
         workflowsDir: "workflows",
         runsDir: "runs",
-        artifactsDir: "artifacts"
+        artifactsDir: "artifacts",
+        availableResources: availableResourcesFromWorkflow(workflow)
       },
       null,
       2
@@ -53,9 +70,14 @@ export async function initializeProject(projectRoot: string, workflowId = DEFAUL
   };
 }
 
-export async function createRun(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<RunState> {
+export async function createRun(
+  projectRoot: string,
+  workflowId = DEFAULT_WORKFLOW_ID,
+  options: RuntimeOptions = {}
+): Promise<RunState> {
   const paths = projectPaths(projectRoot);
   const workflow = await loadWorkflow(paths.projectRoot, workflowId);
+  await assertWorkflowResourcesAvailable(workflow, options.resourceProvider ?? (await loadProjectResourceProvider(paths)));
   const runId = createRunId();
   const runDir = path.join(paths.runsDir, runId);
   const artifactDir = path.join(paths.artifactsDir, runId);
@@ -83,6 +105,7 @@ export async function createRun(projectRoot: string, workflowId = DEFAULT_WORKFL
       completionCriteria: stage.completionCriteria,
       repairPolicy: stage.repairPolicy,
       rerunWhen: stage.rerunWhen,
+      mcpResources: stage.mcpResources,
       agentRole: stage.agentRole,
       verifierRole: stage.verifierRole,
       skills: stage.skills,
@@ -102,10 +125,15 @@ export async function createRun(projectRoot: string, workflowId = DEFAULT_WORKFL
   return runState;
 }
 
-export async function resumeRun(projectRoot: string, runId?: string): Promise<RunState> {
+export async function resumeRun(
+  projectRoot: string,
+  runId?: string,
+  options: RuntimeOptions = {}
+): Promise<RunState> {
   const paths = projectPaths(projectRoot);
   const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
-  await loadWorkflow(paths.projectRoot, runState.workflowId);
+  const workflow = await loadWorkflow(paths.projectRoot, runState.workflowId);
+  await assertWorkflowResourcesAvailable(workflow, options.resourceProvider ?? (await loadProjectResourceProvider(paths)));
   const now = new Date().toISOString();
 
   runState.updatedAt = now;
@@ -181,6 +209,29 @@ async function loadWorkflow(projectRoot: string, workflowId: string): Promise<Wo
   }
 
   return parseWorkflow(await readFile(filePath, "utf8"), filePath);
+}
+
+async function loadProjectResourceProvider(paths: ReturnType<typeof projectPaths>): Promise<ResourceProvider> {
+  const config = await readProjectConfig(paths.configPath);
+  return availableResourceProvider(normalizeAvailableResources(config.availableResources));
+}
+
+async function readProjectConfig(configPath: string): Promise<ProjectConfig> {
+  if (!(await pathExists(configPath))) {
+    throw new AgentMatrixError("AgentMatrix config was not found. Run `agentmatrix init` before starting a run.");
+  }
+
+  try {
+    const config = JSON.parse(await readFile(configPath, "utf8"));
+    if (typeof config === "object" && config !== null && !Array.isArray(config)) {
+      return config as ProjectConfig;
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AgentMatrixError(`Invalid AgentMatrix config JSON in ${configPath}: ${detail}`);
+  }
+
+  throw new AgentMatrixError(`AgentMatrix config ${configPath} must be a JSON object.`);
 }
 
 async function readLatestResumableRun(projectRoot: string): Promise<RunState> {

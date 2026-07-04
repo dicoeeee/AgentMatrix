@@ -35,6 +35,8 @@ stages:
       - type: changed_files
         paths:
           - "**/*"
+    mcp_resources:
+      - filesystem
     agent_role: static_check
     verifier_role: static_check_verifier
     skills:
@@ -74,6 +76,7 @@ test("parseWorkflow reads the editable mr-preflight stage contract", () => {
     { type: "changed_files", paths: ["**/*"], artifacts: [] },
     { type: "changed_artifacts", paths: [], artifacts: ["static_check/stage-report.json"] }
   ]);
+  assert.deepEqual(staticCheck.mcpResources, []);
   assert.deepEqual(staticCheck.skills, ["static-check"]);
   assert.equal(Object.hasOwn(staticCheck, "command"), false);
 });
@@ -132,6 +135,7 @@ test("parseWorkflow accepts logical roles and rejects platform-specific role pat
   const workflow = parseWorkflow(VALID_WORKFLOW, "fixture.workflow.yml");
   assert.equal(workflow.stages[0].agentRole, "static_check");
   assert.equal(workflow.stages[0].verifierRole, "static_check_verifier");
+  assert.deepEqual(workflow.stages[0].mcpResources, ["filesystem"]);
 
   assertWorkflowError(
     VALID_WORKFLOW.replace("    agent_role: static_check", "    agent_role: opencode/static_check"),

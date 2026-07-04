@@ -210,6 +210,13 @@ export const WORKFLOW_SCHEMA: AnySchema = {
               ]
             }
           },
+          mcp_resources: {
+            type: "array",
+            items: {
+              type: "string",
+              minLength: 1
+            }
+          },
           agent_role: {
             type: "string",
             minLength: 1

@@ -14,6 +14,7 @@ export interface StageDefinitionFields {
   completionCriteria: CompletionCriterion[];
   repairPolicy: RepairPolicy;
   rerunWhen: RerunTrigger[];
+  mcpResources: string[];
   agentRole: string;
   verifierRole: string;
   skills: string[];

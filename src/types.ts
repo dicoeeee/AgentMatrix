@@ -145,7 +145,7 @@ export interface WorkflowRuntimeAdapter {
 
 export interface GraphNode {
   id: string;
-  status: StageStatus;
+  status?: StageStatus;
 }
 
 export interface GraphEdge {
@@ -154,9 +154,19 @@ export interface GraphEdge {
 }
 
 export interface RunGraph {
+  kind: "run";
   runId: string;
   workflowId: string;
   status: RunStatus;
   nodes: GraphNode[];
   edges: GraphEdge[];
 }
+
+export interface WorkflowGraph {
+  kind: "workflow";
+  workflowId: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export type VisualizationGraph = RunGraph | WorkflowGraph;

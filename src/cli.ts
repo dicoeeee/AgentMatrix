@@ -9,12 +9,12 @@ import {
   initializeProject,
   readRunForDisplay,
   readRuns,
-  resumeRun,
-  validateWorkflowFile
+  readWorkflowForDisplay,
+  resumeRun
 } from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
 import { AGENTMATRIX_DIR, type RunState, type StageFailureMetadata } from "./types.js";
-import { runToGraph, runToMermaid } from "./visualize.js";
+import { runToGraph, runToMermaid, workflowToGraph, workflowToMermaid } from "./visualize.js";
 
 interface CliIo {
   stdout: { write(message: string): void };
@@ -27,6 +27,15 @@ interface GlobalParseResult {
 }
 
 type VisualizationFormat = "mermaid" | "json";
+type VisualizationTarget =
+  | {
+      kind: "run";
+      runId?: string;
+    }
+  | {
+      kind: "workflow";
+      workflowId: string;
+    };
 
 const HELP = `AgentMatrix
 
@@ -38,7 +47,7 @@ Commands:
   run [workflow]        Start a fresh workflow run
   resume [run-id]       Continue an existing run
   status [--json]       Show current and past run states
-  visualize [run-id]    Render a run as Mermaid or JSON
+  visualize [run-id]    Render a workflow or run as Mermaid or JSON
 
 Global options:
   --project <dir>       Use a project directory other than the current directory
@@ -81,10 +90,11 @@ Usage:
 `,
   visualize: `agentmatrix visualize
 
-Render a run graph as Mermaid or JSON.
+Render a workflow definition or run graph as Mermaid or JSON.
 
 Usage:
   agentmatrix [--project <dir>] visualize [run-id] [--format mermaid|json]
+  agentmatrix [--project <dir>] visualize --workflow mr-preflight [--format mermaid|json]
 `
 };
 
@@ -180,9 +190,20 @@ async function handleStatus(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
-  const { runId, format } = parseVisualizeArgs(args);
-  const runState = await readRunForDisplay(projectRoot, runId);
-  await validateWorkflowFile(projectRoot, runState.workflowId);
+  const { target, format } = parseVisualizeArgs(args);
+
+  if (target.kind === "workflow") {
+    const workflow = await readWorkflowForDisplay(projectRoot, target.workflowId);
+    if (format === "json") {
+      io.stdout.write(`${JSON.stringify(workflowToGraph(workflow), null, 2)}\n`);
+      return;
+    }
+
+    io.stdout.write(workflowToMermaid(workflow));
+    return;
+  }
+
+  const runState = await readRunForDisplay(projectRoot, target.runId);
 
   if (format === "json") {
     io.stdout.write(`${JSON.stringify(runToGraph(runState), null, 2)}\n`);
@@ -289,6 +310,7 @@ function parseStatusArgs(args: string[]) {
 
 function parseVisualizeArgs(args: string[]) {
   let format: VisualizationFormat = "mermaid";
+  let workflowId: string | undefined;
   const positionals: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -309,6 +331,25 @@ function parseVisualizeArgs(args: string[]) {
       continue;
     }
 
+    if (token === "--workflow") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) {
+        throw new CliUsageError("Missing value for --workflow.");
+      }
+      workflowId = parseWorkflowTemplate(value);
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--workflow=")) {
+      const value = token.slice("--workflow=".length);
+      if (!value) {
+        throw new CliUsageError("Missing value for --workflow.");
+      }
+      workflowId = parseWorkflowTemplate(value);
+      continue;
+    }
+
     rejectOptionToken(token, "visualize");
 
     positionals.push(token);
@@ -318,8 +359,20 @@ function parseVisualizeArgs(args: string[]) {
     throw new CliUsageError('Command "visualize" accepts at most one run-id.');
   }
 
+  if (workflowId && positionals.length > 0) {
+    throw new CliUsageError('Command "visualize" cannot combine --workflow with a run-id.');
+  }
+
   return {
-    runId: positionals[0],
+    target: workflowId
+      ? {
+          kind: "workflow" as const,
+          workflowId
+        }
+      : {
+          kind: "run" as const,
+          runId: positionals[0]
+        },
     format
   };
 }

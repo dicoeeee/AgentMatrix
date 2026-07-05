@@ -210,6 +210,14 @@ export async function readRunForDisplay(projectRoot: string, runId?: string): Pr
   return latest;
 }
 
+export async function readWorkflowForDisplay(
+  projectRoot: string,
+  workflowId = DEFAULT_WORKFLOW_ID
+): Promise<WorkflowDefinition> {
+  const paths = projectPaths(projectRoot);
+  return loadWorkflow(paths.projectRoot, workflowId);
+}
+
 export async function validateWorkflowFile(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<void> {
   await loadWorkflow(projectRoot, workflowId);
 }

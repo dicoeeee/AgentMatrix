@@ -480,7 +480,7 @@ test("resume retries a failed run from the failed stage", async () => {
   );
 });
 
-test("visualize validates the edited workflow before rendering run state", async () => {
+test("visualize renders persisted run state when the edited workflow is invalid", async () => {
   const cwd = await tempProject();
   assert.equal((await runCli(["init"], cwd)).code, 0);
   const runId = parseRunId((await runCli(["run"], cwd)).stdout);
@@ -489,10 +489,121 @@ test("visualize validates the edited workflow before rendering run state", async
   const validWorkflow = await readFile(workflowPath, "utf8");
   await writeFile(workflowPath, validWorkflow.replace("    verifier_role: static_check_verifier", "    verifier_role: opencode/static_check_verifier"));
 
-  const result = await runCli(["visualize", runId], cwd);
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /mr-preflight\.workflow\.yml/);
-  assert.match(result.stderr, /stages\[0\]\.verifier_role/);
+  const runGraph = await runCli(["visualize", runId], cwd);
+  assert.equal(runGraph.code, 0, runGraph.stderr);
+  assert.match(runGraph.stdout, /static_check \(success\)/);
+
+  const workflowGraph = await runCli(["visualize", "--workflow", "mr-preflight"], cwd);
+  assert.equal(workflowGraph.code, 1);
+  assert.match(workflowGraph.stderr, /mr-preflight\.workflow\.yml/);
+  assert.match(workflowGraph.stderr, /stages\[0\]\.verifier_role/);
+});
+
+test("visualize renders static workflow definitions as Mermaid and JSON", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const mermaid = await runCli(["visualize", "--workflow", "mr-preflight"], cwd);
+  assert.equal(mermaid.code, 0, mermaid.stderr);
+  assert.match(mermaid.stdout, /graph TD/);
+  assert.match(mermaid.stdout, /static_check/);
+  assert.match(mermaid.stdout, /mr_prepare/);
+  assert.doesNotMatch(mermaid.stdout, /static_check \(pending\)/);
+  assert.doesNotMatch(mermaid.stdout, /run-/);
+
+  const json = await runCli(["visualize", "--workflow", "mr-preflight", "--format", "json"], cwd);
+  assert.equal(json.code, 0, json.stderr);
+  const graph = JSON.parse(json.stdout);
+  assert.equal(graph.kind, "workflow");
+  assert.equal(graph.workflowId, "mr-preflight");
+  assert.equal(Object.hasOwn(graph, "runId"), false);
+  assert.deepEqual(
+    graph.nodes.map((node) => [node.id, Object.hasOwn(node, "status")]),
+    [
+      ["static_check", false],
+      ["test_check", false],
+      ["code_review", false],
+      ["mr_prepare", false]
+    ]
+  );
+  assert.deepEqual(graph.edges, [
+    { from: "static_check", to: "test_check" },
+    { from: "test_check", to: "code_review" },
+    { from: "code_review", to: "mr_prepare" }
+  ]);
+});
+
+test("visualize renders real run state statuses as Mermaid and JSON", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+  const runState = await readRunState(cwd, runId);
+  runState.status = "running";
+  runState.stages = runState.stages.map((stage) => {
+    if (stage.id === "static_check") {
+      return stage;
+    }
+    if (stage.id === "test_check") {
+      return {
+        ...stage,
+        status: "failed",
+        failure: {
+          kind: "command_failure",
+          message: 'Stage "test_check" command failed: npm test.'
+        }
+      };
+    }
+    if (stage.id === "code_review") {
+      return { ...stage, status: "skipped" };
+    }
+    return { ...stage, status: "running" };
+  });
+  await writeRunState(cwd, runState);
+
+  const mermaid = await runCli(["visualize", runId], cwd);
+  assert.equal(mermaid.code, 0, mermaid.stderr);
+  assert.match(mermaid.stdout, /static_check \(success\)/);
+  assert.match(mermaid.stdout, /test_check \(failed\)/);
+  assert.match(mermaid.stdout, /code_review \(skipped\)/);
+  assert.match(mermaid.stdout, /mr_prepare \(running\)/);
+  assert.match(mermaid.stdout, /class stage_1 failed;/);
+  assert.match(mermaid.stdout, /class stage_2 skipped;/);
+  assert.match(mermaid.stdout, /class stage_3 running;/);
+
+  const json = await runCli(["visualize", runId, "--format", "json"], cwd);
+  assert.equal(json.code, 0, json.stderr);
+  const graph = JSON.parse(json.stdout);
+  assert.equal(graph.kind, "run");
+  assert.equal(graph.runId, runId);
+  assert.deepEqual(
+    graph.nodes.map((node) => [node.id, node.status]),
+    [
+      ["static_check", "success"],
+      ["test_check", "failed"],
+      ["code_review", "skipped"],
+      ["mr_prepare", "running"]
+    ]
+  );
+
+  const pendingRunId = await createCompletedRun(cwd);
+  await makeInterruptedAfterStaticCheck(cwd, pendingRunId);
+
+  const pendingMermaid = await runCli(["visualize", pendingRunId], cwd);
+  assert.equal(pendingMermaid.code, 0, pendingMermaid.stderr);
+  assert.match(pendingMermaid.stdout, /test_check \(running\)/);
+  assert.match(pendingMermaid.stdout, /code_review \(pending\)/);
+  assert.match(pendingMermaid.stdout, /class stage_2 pending;/);
+
+  const pendingJson = await runCli(["visualize", pendingRunId, "--format", "json"], cwd);
+  assert.equal(pendingJson.code, 0, pendingJson.stderr);
+  assert.deepEqual(
+    JSON.parse(pendingJson.stdout).nodes.map((node) => [node.id, node.status]),
+    [
+      ["static_check", "success"],
+      ["test_check", "running"],
+      ["code_review", "pending"],
+      ["mr_prepare", "pending"]
+    ]
+  );
 });
 
 test("run validation reports malformed YAML and unsupported workflow status from temporary projects", async () => {
@@ -556,6 +667,10 @@ test("resume, status, and visualize expose run state", async () => {
     { from: "test_check", to: "code_review" },
     { from: "code_review", to: "mr_prepare" }
   ]);
+
+  const latestJson = await runCli(["visualize", "--format", "json"], cwd);
+  assert.equal(latestJson.code, 0, latestJson.stderr);
+  assert.equal(JSON.parse(latestJson.stdout).runId, runId);
 });
 
 test("status summarizes failed and skipped stages with failure metadata", async () => {
@@ -603,4 +718,8 @@ test("CLI parse failures use a predictable non-zero exit code", async () => {
   const missingRun = await runCli(["resume"], cwd);
   assert.equal(missingRun.code, 1);
   assert.match(missingRun.stderr, /No resumable runs/);
+
+  const missingWorkflow = await runCli(["visualize", "--workflow", "--format", "json"], cwd);
+  assert.equal(missingWorkflow.code, 2);
+  assert.match(missingWorkflow.stderr, /Missing value for --workflow/);
 });

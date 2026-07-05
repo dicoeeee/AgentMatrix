@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -224,6 +224,29 @@ async function markStageFailed(projectRoot, runState, stageId) {
     kind: "command_failure",
     message: `Fixture failure in ${stageId}.`
   };
+  await writeRunState(projectRoot, nextRunState);
+  return nextRunState;
+}
+
+async function rewindFromStage(projectRoot, runState, stageId) {
+  const nextRunState = structuredClone(runState);
+  const stageIndex = nextRunState.stages.findIndex((stage) => stage.id === stageId);
+  assert.notEqual(stageIndex, -1, `Expected ${stageId} to exist`);
+  nextRunState.status = "failed";
+
+  nextRunState.stages.forEach((stage, index) => {
+    if (index < stageIndex) {
+      stage.status = "success";
+      delete stage.failure;
+      return;
+    }
+
+    stage.status = "pending";
+    stage.evidence = [];
+    stage.artifacts = [];
+    delete stage.failure;
+  });
+
   await writeRunState(projectRoot, nextRunState);
   return nextRunState;
 }
@@ -757,6 +780,204 @@ test("test_check permits benign isolated test artifacts", async () => {
   const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
   assert.equal(report.commands[0].status, "success");
   assert.deepEqual(report.changed_files, []);
+});
+
+test("code_review emits a clean parallel lane report from prior evidence", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  const report = await readJson(cwd, path.join(runState.artifactPath, "code_review", "stage-report.json"));
+
+  assert.equal(report.status, "success");
+  assert.equal(report.summary, "Code review found no actionable findings across 6 reviewer lanes.");
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.command, command.status, command.parallel_group]),
+    [
+      ["Correctness Review", "review:correctness", "success", "code-review-lanes-1"],
+      ["Security Review", "review:security", "success", "code-review-lanes-1"],
+      ["Maintainability Review", "review:maintainability", "success", "code-review-lanes-1"],
+      ["Performance Review", "review:performance", "success", "code-review-lanes-1"],
+      ["Data Review", "review:data", "success", "code-review-lanes-1"],
+      ["API Review", "review:api", "success", "code-review-lanes-1"]
+    ]
+  );
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.blockers, []);
+  assert.deepEqual(report.changed_files, []);
+});
+
+test("code_review aggregates actionable lane findings with severity and evidence links", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  await writeJson(cwd, path.join(runState.artifactPath, "static_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "static_check",
+      summary: "Static evidence with review signals.",
+      findings: [
+        {
+          severity: "major",
+          source: "security",
+          root_cause: "missing-input-validation",
+          message: "API handler trusts user input."
+        },
+        {
+          severity: "minor",
+          category: "maintainability",
+          root_cause: "complex-handler",
+          message: "Handler complexity makes the change hard to audit."
+        },
+        {
+          severity: "major",
+          source: "performance",
+          root_cause: "unbounded-query",
+          message: "Query loads all rows before filtering."
+        }
+      ]
+    })
+  });
+  await writeJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "test_check",
+      summary: "Test evidence with review signals.",
+      findings: [
+        {
+          severity: "blocker",
+          source: "test",
+          root_cause: "null-user-regression",
+          message: "Null user test fails."
+        },
+        {
+          severity: "major",
+          category: "data",
+          root_cause: "missing-rollback",
+          message: "Migration has no rollback path."
+        },
+        {
+          severity: "major",
+          category: "api",
+          root_cause: "api-contract-drift",
+          message: "Response omits a required API field."
+        }
+      ]
+    })
+  });
+  await rewindFromStage(cwd, runState, "code_review");
+
+  const resumed = await resumeRun(cwd, runState.id, { runtimeAdapter: createMockRuntimeAdapter() });
+
+  assert.equal(resumed.status, "success");
+  const report = await readJson(cwd, path.join(runState.artifactPath, "code_review", "stage-report.json"));
+  assert.equal(report.summary, "Code review found 6 actionable findings across 6 reviewer lanes.");
+  assert.deepEqual(
+    report.commands.map((command) => [command.command, command.summary]),
+    [
+      ["review:correctness", "1 actionable finding."],
+      ["review:security", "1 actionable finding."],
+      ["review:maintainability", "1 actionable finding."],
+      ["review:performance", "1 actionable finding."],
+      ["review:data", "1 actionable finding."],
+      ["review:api", "1 actionable finding."]
+    ]
+  );
+  assert.deepEqual(
+    report.findings.map((finding) => [finding.severity, finding.root_cause, finding.lanes]),
+    [
+      ["critical", "null-user-regression", ["correctness"]],
+      ["major", "api-contract-drift", ["api"]],
+      ["major", "missing-input-validation", ["security"]],
+      ["major", "missing-rollback", ["data"]],
+      ["major", "unbounded-query", ["performance"]],
+      ["minor", "complex-handler", ["maintainability"]]
+    ]
+  );
+  for (const finding of report.findings) {
+    assert.ok(finding.evidence.length > 0);
+    assert.match(finding.evidence[0].artifact, /stage-report\.json$/);
+  }
+});
+
+test("code_review merges duplicate findings by root cause", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  await writeJson(cwd, path.join(runState.artifactPath, "static_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "static_check",
+      findings: [
+        {
+          severity: "major",
+          source: "security",
+          root_cause: "missing-input-validation",
+          message: "Security lane saw unvalidated input."
+        }
+      ]
+    })
+  });
+  await writeJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "test_check",
+      findings: [
+        {
+          severity: "blocker",
+          source: "test",
+          root_cause: "missing-input-validation",
+          message: "Correctness lane saw the same unvalidated input."
+        }
+      ]
+    })
+  });
+  await rewindFromStage(cwd, runState, "code_review");
+
+  await resumeRun(cwd, runState.id, { runtimeAdapter: createMockRuntimeAdapter() });
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "code_review", "stage-report.json"));
+  assert.equal(report.findings.length, 1);
+  assert.deepEqual(report.findings[0].lanes, ["correctness", "security"]);
+  assert.equal(report.findings[0].severity, "critical");
+  assert.deepEqual(report.findings[0].source_stages, ["static_check", "test_check"]);
+  assert.equal(report.findings[0].evidence.length, 2);
+});
+
+test("code_review blocks when required prior evidence is missing", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  const missingReportPath = path.join(runState.artifactPath, "test_check", "stage-report.json");
+  await rm(path.join(cwd, missingReportPath));
+  await rewindFromStage(cwd, runState, "code_review");
+
+  await assert.rejects(
+    () => resumeRun(cwd, runState.id, { runtimeAdapter: createMockRuntimeAdapter() }),
+    /Stage "code_review" reported blocker: Required input "test_check_report" is missing/
+  );
+
+  const [resumed] = await readRuns(cwd);
+  const codeReview = resumed.stages.find((stage) => stage.id === "code_review");
+  assert.equal(codeReview.status, "failed");
+  assert.equal(codeReview.failure.kind, "missing_resource");
+  assert.deepEqual(codeReview.failure.metadata, {
+    blockerType: "missing_resource",
+    blockerMessage: `Required input "test_check_report" is missing or unreadable at ${missingReportPath}.`,
+    resource: missingReportPath
+  });
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "code_review", "stage-report.json"));
+  assert.equal(report.status, "failed");
+  assert.deepEqual(report.blockers, [
+    {
+      type: "missing_resource",
+      message: `Required input "test_check_report" is missing or unreadable at ${missingReportPath}.`,
+      resource: missingReportPath
+    }
+  ]);
+  assert.deepEqual(
+    report.commands.map((command) => [command.command, command.status, command.reason]),
+    [
+      ["review:correctness", "skipped", "Required prior stage evidence is missing."],
+      ["review:security", "skipped", "Required prior stage evidence is missing."],
+      ["review:maintainability", "skipped", "Required prior stage evidence is missing."],
+      ["review:performance", "skipped", "Required prior stage evidence is missing."],
+      ["review:data", "skipped", "Required prior stage evidence is missing."],
+      ["review:api", "skipped", "Required prior stage evidence is missing."]
+    ]
+  );
 });
 
 test("runtime fails a stage when the stage report violates the built-in schema", async () => {

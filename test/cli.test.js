@@ -311,6 +311,21 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
         (await readProjectJson(cwd, path.join(runState.artifactPath, "test_check", "test-output.json"))).commands,
         []
       );
+    } else if (stage.id === "code_review") {
+      assert.equal(stageReport.summary, "Code review found no actionable findings across 6 reviewer lanes.");
+      assert.deepEqual(
+        stageReport.commands.map((command) => [command.command, command.status, command.parallel_group]),
+        [
+          ["review:correctness", "success", "code-review-lanes-1"],
+          ["review:security", "success", "code-review-lanes-1"],
+          ["review:maintainability", "success", "code-review-lanes-1"],
+          ["review:performance", "success", "code-review-lanes-1"],
+          ["review:data", "success", "code-review-lanes-1"],
+          ["review:api", "success", "code-review-lanes-1"]
+        ]
+      );
+      assert.deepEqual(stageReport.findings, []);
+      assert.deepEqual(stageReport.skipped, []);
     } else {
       assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
       assert.deepEqual(stageReport.skipped, []);

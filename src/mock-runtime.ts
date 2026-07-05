@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { executeCodeReviewStage } from "./code-review.js";
 import { writeProjectJson, writeProjectText } from "./project-files.js";
 import { executeStaticCheckStage, type StaticCheckOptions } from "./static-check.js";
 import { executeTestCheckStage, type TestCheckOptions } from "./test-check.js";
@@ -18,6 +19,9 @@ export function createMockRuntimeAdapter(options: MockRuntimeOptions = {}): Work
       }
       if (context.stage.id === "test_check") {
         return executeTestCheckStage(context, options.testCheck);
+      }
+      if (context.stage.id === "code_review") {
+        return executeCodeReviewStage(context);
       }
 
       const outputArtifacts = context.stage.outputs.map((output) =>

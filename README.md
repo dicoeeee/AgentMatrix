@@ -21,7 +21,15 @@ node dist/cli.js --help
 
 Supported MVP verbs are `init`, `run`, `resume`, `status`, and `visualize`.
 
-`agentmatrix init --workflow mr-preflight` creates a project-local `.agentmatrix/` directory with workflow templates, run state, and artifact directories. It does not initialize or require git in the target project. `agentmatrix run` creates a fresh run every time and executes the built-in workflow with static-check, test-check, code-review, and MR-prepare mock adapters, plus mock verifier agents; `resume`, `status`, and `visualize` operate on the filesystem-backed run state. `agentmatrix visualize --workflow mr-preflight` renders the static workflow definition, while `agentmatrix visualize [run-id]` renders actual run state. Both targets support `--format mermaid|json`.
+`agentmatrix init --workflow mr-preflight` creates a project-local `.agentmatrix/` directory with workflow templates, run state, and artifact directories. It does not initialize or require git in the target project. `agentmatrix run` creates a fresh run every time and executes the built-in workflow with static-check, test-check, code-review, and MR-prepare mock adapters by default, plus mock verifier agents; `resume`, `status`, and `visualize` operate on the filesystem-backed run state. `agentmatrix visualize --workflow mr-preflight` renders the static workflow definition, while `agentmatrix visualize [run-id]` renders actual run state. Both targets support `--format mermaid|json`.
+
+Use OpenCode as the runtime adapter with:
+
+```sh
+node dist/cli.js run --runtime opencode
+```
+
+`run` and `resume` also accept `--opencode-bin <path>`, `--opencode-model <provider/model>`, `--opencode-attach <url>`, and `--opencode-auto` when `--runtime opencode` is selected. The OpenCode adapter invokes `opencode run --agent <role> --dir <project> --format json` for each execution and verifier role declared by the workflow. Execution agents are expected to write the declared stage outputs, including `stage_report`; verifier agents are expected to write verifier evidence with an `accepted` boolean.
 
 The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction; static and test commands are discovered by, or injected into, the runtime adapter rather than stored in workflow YAML.
 

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { createRun, initializeProject, readRuns, resumeRun } from "../dist/storage.js";
 
 import { createMockRuntimeAdapter } from "../dist/mock-runtime.js";
+import { createOpencodeRuntimeAdapter } from "../dist/opencode-runtime.js";
 
 async function tempProject() {
   const root = path.join(tmpdir(), `agentmatrix-runtime-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -41,6 +42,106 @@ async function writeDeclaredOutputs(context) {
       await writeFile(path.join(context.projectRoot, outputPath), `Fixture output for ${output.id}\n`);
     }
   }
+}
+
+async function createFakeOpencode(projectRoot, options = {}) {
+  const executable = path.join(projectRoot, "fake-opencode.js");
+  const logPath = path.join(projectRoot, "opencode-calls.jsonl");
+  const rejectVerifierForStage = options.rejectVerifierForStage ?? null;
+
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const args = process.argv.slice(2);
+const prompt = args.at(-1) ?? "";
+const agent = args[args.indexOf("--agent") + 1];
+const dir = args[args.indexOf("--dir") + 1];
+const format = args[args.indexOf("--format") + 1];
+const match = /AGENTMATRIX_CONTEXT_JSON\\n([\\s\\S]*?)\\nEND_AGENTMATRIX_CONTEXT_JSON/.exec(prompt);
+
+if (!match) {
+  console.error("missing AgentMatrix context");
+  process.exit(2);
+}
+
+const context = JSON.parse(match[1]);
+
+await appendFile(
+  ${JSON.stringify(logPath)},
+  JSON.stringify({ args, agent, dir, format, kind: context.kind, stage_id: context.stage.id }) + "\\n"
+);
+
+async function writeJson(relativePath, data) {
+  const filePath = path.join(dir, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(data, null, 2) + "\\n");
+}
+
+async function writeText(relativePath, data) {
+  const filePath = path.join(dir, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, data);
+}
+
+if (context.kind === "stage_verification") {
+  const accepted = context.stage.id !== ${JSON.stringify(rejectVerifierForStage)};
+  await writeJson(context.verifier_evidence_path, {
+    schema_version: 1,
+    run_id: context.run_id,
+    stage_id: context.stage.id,
+    verifier_role: context.stage.verifier_role,
+    accepted,
+    checked_artifact: context.stage_report_path,
+    summary: accepted ? "fake verifier accepted" : "fake verifier rejected"
+  });
+  process.exit(0);
+}
+
+for (const output of context.outputs) {
+  if (output.id !== "stage_report") {
+    await writeText(output.path, \`fake output for \${output.id}\\n\`);
+  }
+}
+
+const report = {
+  schema_version: 1,
+  run_id: context.run_id,
+  stage_id: context.stage.id,
+  status: "success",
+  summary: \`fake opencode completed \${context.stage.id}\`,
+  commands: [],
+  findings: [],
+  artifacts: context.outputs.map((output) => output.path),
+  skipped: [],
+  changed_files: [],
+  blockers: []
+};
+
+await writeJson(context.stage_report_path, report);
+await writeJson(context.executor_evidence_path, {
+  schema_version: 1,
+  run_id: context.run_id,
+  stage_id: context.stage.id,
+  agent_role: context.stage.agent_role,
+  status: "success",
+  summary: report.summary
+});
+`,
+    "utf8"
+  );
+  await chmod(executable, 0o755);
+
+  return { executable, logPath };
+}
+
+async function readJsonLines(filePath) {
+  return (await readFile(filePath, "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 function rejectingRuntimeAdapter() {
@@ -361,6 +462,64 @@ test("runtime stops before the next stage when verifier rejects evidence", async
     ]
   );
   assert.equal(runState.stages[0].failure.kind, "verifier_failure");
+});
+
+test("opencode runtime invokes stage and verifier agents for each workflow stage", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  const { executable, logPath } = await createFakeOpencode(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+  });
+
+  assert.equal(runState.status, "success");
+  assertAllStagesSuccessful(runState);
+
+  const calls = await readJsonLines(logPath);
+  assert.deepEqual(
+    calls.map((call) => [call.agent, call.kind, call.stage_id]),
+    [
+      ["static_check", "stage_execution", "static_check"],
+      ["static_check_verifier", "stage_verification", "static_check"],
+      ["test_check", "stage_execution", "test_check"],
+      ["test_check_verifier", "stage_verification", "test_check"],
+      ["code_review", "stage_execution", "code_review"],
+      ["code_review_verifier", "stage_verification", "code_review"],
+      ["mr_prepare", "stage_execution", "mr_prepare"],
+      ["mr_prepare_verifier", "stage_verification", "mr_prepare"]
+    ]
+  );
+  assert.ok(calls.every((call) => call.dir === cwd));
+  assert.ok(calls.every((call) => call.format === "json"));
+
+  const mrPrepare = runState.stages.find((stage) => stage.id === "mr_prepare");
+  assert.ok(mrPrepare);
+  assert.equal(
+    await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "title.md"), "utf8"),
+    "fake output for mr_title\n"
+  );
+  assert.equal(mrPrepare.evidence.length, 2);
+});
+
+test("opencode runtime fails a stage when the verifier evidence rejects it", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  const { executable } = await createFakeOpencode(cwd, { rejectVerifierForStage: "static_check" });
+
+  await assert.rejects(
+    () =>
+      createRun(cwd, "mr-preflight", {
+        runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+      }),
+    /Verifier static_check_verifier rejected stage "static_check"/
+  );
+
+  const [runState] = await readRuns(cwd);
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+  assert.equal(runState.stages[0].failure.kind, "verifier_failure");
+  assert.equal(runState.stages[1].status, "pending");
 });
 
 test("static_check aggregates read-only gates in parallel and records language references", async () => {

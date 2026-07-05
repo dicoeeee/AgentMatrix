@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
 import { createMockRuntimeAdapter } from "./mock-runtime.js";
+import { createOpencodeRuntimeAdapter, type OpencodeRuntimeOptions } from "./opencode-runtime.js";
 import {
   createRun,
   initializeProject,
@@ -27,6 +29,7 @@ interface GlobalParseResult {
 }
 
 type VisualizationFormat = "mermaid" | "json";
+type RuntimeKind = "mock" | "opencode";
 type VisualizationTarget =
   | {
       kind: "run";
@@ -72,14 +75,28 @@ Usage:
 Start a fresh workflow run and write project-local filesystem state.
 
 Usage:
-  agentmatrix [--project <dir>] run [workflow]
+  agentmatrix [--project <dir>] run [workflow] [--runtime mock|opencode]
+
+Runtime options:
+  --runtime <runtime>       Runtime adapter to use: mock or opencode
+  --opencode-bin <path>     OpenCode executable path when using --runtime opencode
+  --opencode-model <model>  OpenCode model in provider/model form
+  --opencode-attach <url>   Attach to a running opencode serve instance
+  --opencode-auto           Pass --auto to opencode run
 `,
   resume: `agentmatrix resume
 
 Continue an existing run by id, or the latest resumable run when no id is provided.
 
 Usage:
-  agentmatrix [--project <dir>] resume [run-id]
+  agentmatrix [--project <dir>] resume [run-id] [--runtime mock|opencode]
+
+Runtime options:
+  --runtime <runtime>       Runtime adapter to use: mock or opencode
+  --opencode-bin <path>     OpenCode executable path when using --runtime opencode
+  --opencode-model <model>  OpenCode model in provider/model form
+  --opencode-attach <url>   Attach to a running opencode serve instance
+  --opencode-auto           Pass --auto to opencode run
 `,
   status: `agentmatrix status
 
@@ -154,8 +171,8 @@ async function handleInit(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleRun(projectRoot: string, args: string[], io: CliIo) {
-  const workflowId = parseOptionalPositional(args, "run", "workflow");
-  const runState = await createRun(projectRoot, workflowId, { runtimeAdapter: createMockRuntimeAdapter() });
+  const { positional: workflowId, runtimeAdapter } = parseExecutionArgs(args, "run", "workflow");
+  const runState = await createRun(projectRoot, workflowId, { runtimeAdapter });
   io.stdout.write(`Created run ${runState.id} for workflow ${runState.workflowId}\n`);
   io.stdout.write(`State: ${AGENTMATRIX_DIR}/runs/${runState.id}/run.json\n`);
   if (runState.status === "success") {
@@ -164,8 +181,8 @@ async function handleRun(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleResume(projectRoot: string, args: string[], io: CliIo) {
-  const runId = parseOptionalPositional(args, "resume", "run-id");
-  const runState = await resumeRun(projectRoot, runId, { runtimeAdapter: createMockRuntimeAdapter() });
+  const { positional: runId, runtimeAdapter } = parseExecutionArgs(args, "resume", "run-id");
+  const runState = await resumeRun(projectRoot, runId, { runtimeAdapter });
   io.stdout.write(`Resumed run ${runState.id}\n`);
   if (runState.status === "success") {
     io.stdout.write(`Completed run ${runState.id}\n`);
@@ -293,6 +310,94 @@ function parseOptionalPositional(args: string[], command: string, name: string) 
   return args[0];
 }
 
+function parseExecutionArgs(args: string[], command: string, name: string) {
+  let runtime: RuntimeKind = "mock";
+  const opencodeOptions: OpencodeRuntimeOptions = {};
+  const positionals: string[] = [];
+  let sawOpencodeOption = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+
+    if (token === "--runtime") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new CliUsageError("Missing value for --runtime.");
+      }
+      runtime = parseRuntime(value);
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--runtime=")) {
+      runtime = parseRuntime(token.slice("--runtime=".length));
+      continue;
+    }
+
+    if (token === "--opencode-bin") {
+      opencodeOptions.executable = readOptionValue(args, index, "--opencode-bin");
+      sawOpencodeOption = true;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--opencode-bin=")) {
+      opencodeOptions.executable = readInlineOptionValue(token, "--opencode-bin");
+      sawOpencodeOption = true;
+      continue;
+    }
+
+    if (token === "--opencode-model") {
+      opencodeOptions.model = readOptionValue(args, index, "--opencode-model");
+      sawOpencodeOption = true;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--opencode-model=")) {
+      opencodeOptions.model = readInlineOptionValue(token, "--opencode-model");
+      sawOpencodeOption = true;
+      continue;
+    }
+
+    if (token === "--opencode-attach") {
+      opencodeOptions.attach = readOptionValue(args, index, "--opencode-attach");
+      sawOpencodeOption = true;
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--opencode-attach=")) {
+      opencodeOptions.attach = readInlineOptionValue(token, "--opencode-attach");
+      sawOpencodeOption = true;
+      continue;
+    }
+
+    if (token === "--opencode-auto") {
+      opencodeOptions.autoApprove = true;
+      sawOpencodeOption = true;
+      continue;
+    }
+
+    rejectOptionToken(token, command);
+    positionals.push(token);
+  }
+
+  if (positionals.length > 1) {
+    throw new CliUsageError(`Command "${command}" accepts at most one ${name}.`);
+  }
+
+  if (runtime !== "opencode" && sawOpencodeOption) {
+    throw new CliUsageError("OpenCode options require --runtime opencode.");
+  }
+
+  return {
+    positional: positionals[0],
+    runtimeAdapter:
+      runtime === "opencode" ? createOpencodeRuntimeAdapter(opencodeOptions) : createMockRuntimeAdapter()
+  };
+}
+
 function parseStatusArgs(args: string[]) {
   let asJson = false;
 
@@ -384,6 +489,29 @@ function parseFormat(value: string): VisualizationFormat {
   throw new CliUsageError('Visualization format must be "mermaid" or "json".');
 }
 
+function parseRuntime(value: string): RuntimeKind {
+  if (value === "mock" || value === "opencode") {
+    return value;
+  }
+  throw new CliUsageError('Runtime must be "mock" or "opencode".');
+}
+
+function readOptionValue(args: string[], index: number, optionName: string) {
+  const value = args[index + 1];
+  if (!value || value.startsWith("-")) {
+    throw new CliUsageError(`Missing value for ${optionName}.`);
+  }
+  return value;
+}
+
+function readInlineOptionValue(token: string, optionName: string) {
+  const value = token.slice(`${optionName}=`.length);
+  if (!value) {
+    throw new CliUsageError(`Missing value for ${optionName}.`);
+  }
+  return value;
+}
+
 function rejectUnknownOptions(args: string[], command: string) {
   for (const token of args) {
     rejectOptionToken(token, command);
@@ -459,6 +587,14 @@ function normalizeError(error: unknown) {
   return new AgentMatrixError(String(error));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isCliEntrypoint(argvPath: string) {
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argvPath);
+  } catch {
+    return import.meta.url === pathToFileURL(argvPath).href;
+  }
+}
+
+if (process.argv[1] && isCliEntrypoint(process.argv[1])) {
   process.exitCode = await runCli(process.argv.slice(2));
 }

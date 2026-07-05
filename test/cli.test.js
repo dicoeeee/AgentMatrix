@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -43,6 +43,89 @@ async function runCli(args, cwd) {
   }
 }
 
+async function createFakeOpencode(cwd) {
+  const executable = path.join(cwd, "fake-opencode.js");
+  const logPath = path.join(cwd, "opencode-calls.jsonl");
+
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
+const args = process.argv.slice(2);
+const prompt = args.at(-1) ?? "";
+const agent = args[args.indexOf("--agent") + 1];
+const dir = args[args.indexOf("--dir") + 1];
+const match = /AGENTMATRIX_CONTEXT_JSON\\n([\\s\\S]*?)\\nEND_AGENTMATRIX_CONTEXT_JSON/.exec(prompt);
+
+if (!match) {
+  console.error("missing AgentMatrix context");
+  process.exit(2);
+}
+
+const context = JSON.parse(match[1]);
+await appendFile(${JSON.stringify(logPath)}, JSON.stringify({ agent, kind: context.kind, stage_id: context.stage.id }) + "\\n");
+
+async function writeJson(relativePath, data) {
+  const filePath = path.join(dir, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(data, null, 2) + "\\n");
+}
+
+async function writeText(relativePath, data) {
+  const filePath = path.join(dir, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, data);
+}
+
+if (context.kind === "stage_verification") {
+  await writeJson(context.verifier_evidence_path, {
+    schema_version: 1,
+    run_id: context.run_id,
+    stage_id: context.stage.id,
+    verifier_role: context.stage.verifier_role,
+    accepted: true,
+    checked_artifact: context.stage_report_path,
+    summary: "fake verifier accepted"
+  });
+  process.exit(0);
+}
+
+for (const output of context.outputs) {
+  if (output.id !== "stage_report") {
+    await writeText(output.path, \`fake output for \${output.id}\\n\`);
+  }
+}
+
+await writeJson(context.stage_report_path, {
+  schema_version: 1,
+  run_id: context.run_id,
+  stage_id: context.stage.id,
+  status: "success",
+  summary: \`fake opencode completed \${context.stage.id}\`,
+  commands: [],
+  findings: [],
+  artifacts: context.outputs.map((output) => output.path),
+  skipped: [],
+  changed_files: [],
+  blockers: []
+});
+await writeJson(context.executor_evidence_path, {
+  schema_version: 1,
+  run_id: context.run_id,
+  stage_id: context.stage.id,
+  agent_role: context.stage.agent_role,
+  status: "success",
+  summary: "fake executor completed"
+});
+`,
+    "utf8"
+  );
+  await chmod(executable, 0o755);
+  return { executable, logPath };
+}
+
 function parseRunId(stdout) {
   const match = stdout.match(/Created run ([^\s]+)/);
   assert.ok(match, `Expected stdout to contain a run id, got:\n${stdout}`);
@@ -62,6 +145,13 @@ async function writeRunState(cwd, runState) {
 
 async function readProjectJson(cwd, relativePath) {
   return JSON.parse(await readFile(path.join(cwd, relativePath), "utf8"));
+}
+
+async function readJsonLines(filePath) {
+  return (await readFile(filePath, "utf8"))
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 async function createCompletedRun(cwd) {
@@ -135,6 +225,18 @@ test("help output lists the supported MVP verbs", async () => {
   assert.equal(runHelp.code, 0, runHelp.stderr);
   assert.match(runHelp.stdout, /agentmatrix run/);
   assert.match(runHelp.stdout, /fresh workflow run/);
+});
+
+test("help output works when the CLI is invoked through a symlinked bin path", async () => {
+  const cwd = await tempProject();
+  const linkedBinPath = path.join(cwd, "agentmatrix");
+  await symlink(cliPath, linkedBinPath);
+
+  const direct = await runCli(["--help"], cwd);
+  const linked = await execFileAsync(process.execPath, [linkedBinPath, "--help"], { cwd });
+
+  assert.equal(linked.stdout, direct.stdout);
+  assert.equal(linked.stderr, "");
 });
 
 test("init creates a project-local runtime skeleton without requiring git", async () => {
@@ -359,6 +461,44 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
     assert.equal(verifierEvidence.accepted, true);
     assert.equal(verifierEvidence.checked_artifact, stage.artifacts[0]);
   }
+});
+
+test("run can execute through the opencode runtime adapter", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+  const { executable, logPath } = await createFakeOpencode(cwd);
+
+  const run = await runCli(["run", "--runtime", "opencode", "--opencode-bin", executable], cwd);
+  assert.equal(run.code, 0, run.stderr);
+  assert.match(run.stdout, /Completed run/);
+
+  const runId = parseRunId(run.stdout);
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.status, "success");
+  assert.deepEqual(
+    runState.stages.map((stage) => [stage.id, stage.status]),
+    [
+      ["static_check", "success"],
+      ["test_check", "success"],
+      ["code_review", "success"],
+      ["mr_prepare", "success"]
+    ]
+  );
+
+  const calls = await readJsonLines(logPath);
+  assert.deepEqual(
+    calls.map((call) => call.agent),
+    [
+      "static_check",
+      "static_check_verifier",
+      "test_check",
+      "test_check_verifier",
+      "code_review",
+      "code_review_verifier",
+      "mr_prepare",
+      "mr_prepare_verifier"
+    ]
+  );
 });
 
 test("run validates edited workflow before creating a run", async () => {

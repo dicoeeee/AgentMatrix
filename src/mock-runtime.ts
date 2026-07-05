@@ -2,10 +2,12 @@ import path from "node:path";
 
 import { writeProjectJson, writeProjectText } from "./project-files.js";
 import { executeStaticCheckStage, type StaticCheckOptions } from "./static-check.js";
+import { executeTestCheckStage, type TestCheckOptions } from "./test-check.js";
 import type { WorkflowOutput, WorkflowRuntimeAdapter } from "./types.js";
 
 export interface MockRuntimeOptions {
   staticCheck?: StaticCheckOptions;
+  testCheck?: TestCheckOptions;
 }
 
 export function createMockRuntimeAdapter(options: MockRuntimeOptions = {}): WorkflowRuntimeAdapter {
@@ -13,6 +15,9 @@ export function createMockRuntimeAdapter(options: MockRuntimeOptions = {}): Work
     async executeStage(context) {
       if (context.stage.id === "static_check") {
         return executeStaticCheckStage(context, options.staticCheck);
+      }
+      if (context.stage.id === "test_check") {
+        return executeTestCheckStage(context, options.testCheck);
       }
 
       const outputArtifacts = context.stage.outputs.map((output) =>

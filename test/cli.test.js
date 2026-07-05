@@ -297,6 +297,20 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
           .languages,
         []
       );
+    } else if (stage.id === "test_check") {
+      assert.equal(stageReport.summary, "No repository test commands were discovered.");
+      assert.deepEqual(stageReport.commands, []);
+      assert.deepEqual(stageReport.skipped, [
+        {
+          id: "test-commands",
+          reason: "No repository test commands were discovered."
+        }
+      ]);
+      assert.ok(stageReport.artifacts.includes(path.join(runState.artifactPath, "test_check", "test-output.json")));
+      assert.deepEqual(
+        (await readProjectJson(cwd, path.join(runState.artifactPath, "test_check", "test-output.json"))).commands,
+        []
+      );
     } else {
       assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
       assert.deepEqual(stageReport.skipped, []);

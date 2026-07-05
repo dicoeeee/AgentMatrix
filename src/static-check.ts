@@ -1,10 +1,16 @@
-import { createHash } from "node:crypto";
-import { execFile, type ExecFileException } from "node:child_process";
-import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import { writeProjectJson } from "./project-files.js";
+import {
+  createIsolatedWorkspace,
+  diffSnapshots,
+  readMakeTargets,
+  readPackageScripts,
+  runCommand,
+  snapshotWorkspace,
+  type WorkspaceSnapshot
+} from "./stage-command-utils.js";
 import type { StageReport, StageReportCommand, StageReportSkippedItem } from "./stage-report.js";
 import type { StageExecutionContext, StageExecutionResult } from "./types.js";
 
@@ -51,15 +57,6 @@ interface CommandExecution {
   changedFiles: string[];
 }
 
-interface WorkspaceSnapshotEntry {
-  hash: string;
-  content: Buffer;
-}
-
-type WorkspaceSnapshot = Map<string, WorkspaceSnapshotEntry>;
-
-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
-const MAX_COMMAND_BUFFER = 10 * 1024 * 1024;
 const WORKSPACE_IGNORED_DIRECTORIES = new Set([
   ".agentmatrix",
   ".git",
@@ -253,7 +250,7 @@ async function executeStaticCheckGates(
   }
 
   const beforeWriters =
-    writerGates.length > 0 ? await snapshotWorkspace(projectRoot) : new Map<string, WorkspaceSnapshotEntry>();
+    writerGates.length > 0 ? await snapshotProjectWorkspace(projectRoot) : new Map<string, { hash: string }>();
   const writerExecutions: CommandExecution[] = [];
 
   for (const gate of writerGates) {
@@ -261,7 +258,7 @@ async function executeStaticCheckGates(
   }
 
   if (writerExecutions.length > 0) {
-    const afterWriters = await snapshotWorkspace(projectRoot);
+    const afterWriters = await snapshotProjectWorkspace(projectRoot);
     const changedFiles = diffSnapshots(beforeWriters, afterWriters);
     if (changedFiles.length > 0) {
       writerExecutions[writerExecutions.length - 1].command.summary = appendSummary(
@@ -290,7 +287,11 @@ async function executeReadOnlyGate(
   gate: StaticCheckGate,
   parallelGroup?: string
 ): Promise<CommandExecution> {
-  const isolatedRoot = await createIsolatedWorkspace(projectRoot);
+  const isolatedRoot = await createIsolatedWorkspace(
+    projectRoot,
+    "agentmatrix-static-check",
+    ISOLATION_COPY_IGNORED_DIRECTORIES
+  );
 
   try {
     return await executeGate(isolatedRoot, projectRoot, gate, parallelGroup);
@@ -342,70 +343,6 @@ async function executeGate(
       ...(parallelGroup ? { parallel_group: parallelGroup } : {})
     }
   };
-}
-
-async function runCommand(argv: string[], cwd: string, projectRoot: string, timeoutMs = DEFAULT_COMMAND_TIMEOUT_MS) {
-  const [executable, ...args] = argv;
-
-  return new Promise<{ exitCode: number; stdout: string; stderr: string }>((resolve) => {
-    execFile(
-      executable,
-      args,
-      {
-        cwd,
-        timeout: timeoutMs,
-        maxBuffer: MAX_COMMAND_BUFFER,
-        env: {
-          ...process.env,
-          CI: process.env.CI ?? "true",
-          PATH: commandPath(projectRoot)
-        }
-      },
-      (error: ExecFileException | null, stdout: string | Buffer, stderr: string | Buffer) => {
-        resolve({
-          exitCode: exitCodeFromError(error),
-          stdout: stringifyOutput(stdout),
-          stderr: stringifyOutput(stderr || error?.message || "")
-        });
-      }
-    );
-  });
-}
-
-async function createIsolatedWorkspace(projectRoot: string) {
-  const isolatedRoot = path.join(
-    tmpdir(),
-    `agentmatrix-static-check-${Date.now()}-${Math.random().toString(16).slice(2)}`
-  );
-  await mkdir(isolatedRoot, { recursive: true });
-  await copyWorkspace(projectRoot, isolatedRoot);
-  return isolatedRoot;
-}
-
-async function copyWorkspace(sourceRoot: string, targetRoot: string, currentDirectory = sourceRoot) {
-  const entries = await readdir(currentDirectory, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (entry.isDirectory()) {
-      if (!ISOLATION_COPY_IGNORED_DIRECTORIES.has(entry.name)) {
-        await copyWorkspace(sourceRoot, targetRoot, path.join(currentDirectory, entry.name));
-      }
-      continue;
-    }
-
-    if (!entry.isFile()) {
-      continue;
-    }
-
-    const sourcePath = path.join(currentDirectory, entry.name);
-    const targetPath = path.join(targetRoot, path.relative(sourceRoot, sourcePath));
-    await mkdir(path.dirname(targetPath), { recursive: true });
-    await writeFile(targetPath, await readFile(sourcePath));
-  }
-}
-
-function commandPath(projectRoot: string) {
-  return [path.join(projectRoot, "node_modules", ".bin"), process.env.PATH ?? ""].filter(Boolean).join(path.delimiter);
 }
 
 async function discoverStaticCheckPlan(projectRoot: string): Promise<StaticCheckPlan> {
@@ -500,50 +437,6 @@ function makeTargetGate(
   };
 }
 
-async function readPackageScripts(projectRoot: string): Promise<Record<string, string>> {
-  try {
-    const packageJson = JSON.parse(await readFile(path.join(projectRoot, "package.json"), "utf8")) as unknown;
-    if (!isRecord(packageJson) || !isRecord(packageJson.scripts)) {
-      return {};
-    }
-
-    return Object.fromEntries(
-      Object.entries(packageJson.scripts).filter((entry): entry is [string, string] => typeof entry[1] === "string")
-    );
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) {
-      return {};
-    }
-    throw error;
-  }
-}
-
-async function readMakeTargets(projectRoot: string): Promise<Set<string>> {
-  for (const fileName of ["Makefile", "makefile", "GNUmakefile"]) {
-    try {
-      return parseMakeTargets(await readFile(path.join(projectRoot, fileName), "utf8"));
-    } catch (error) {
-      if (!hasErrorCode(error, "ENOENT")) {
-        throw error;
-      }
-    }
-  }
-
-  return new Set();
-}
-
-function parseMakeTargets(source: string) {
-  const targets = new Set<string>();
-  const targetPattern = /^([A-Za-z0-9_.-]+)\s*:(?![=])/gm;
-  let match: RegExpExecArray | null;
-
-  while ((match = targetPattern.exec(source))) {
-    targets.add(match[1]);
-  }
-
-  return targets;
-}
-
 function selectLanguageReferences(projectFiles: string[]): StaticCheckLanguage[] {
   return LANGUAGE_DEFINITIONS.flatMap((definition) => {
     const matches = projectFiles.filter((relativePath) => definition.matches(relativePath));
@@ -586,24 +479,8 @@ async function listProjectFiles(projectRoot: string) {
   return files.sort();
 }
 
-async function snapshotWorkspace(projectRoot: string): Promise<WorkspaceSnapshot> {
-  const snapshot: WorkspaceSnapshot = new Map();
-
-  for (const relativePath of await listProjectFiles(projectRoot)) {
-    const filePath = path.join(projectRoot, relativePath);
-    const content = await readFile(filePath);
-    snapshot.set(relativePath, {
-      hash: createHash("sha256").update(content).digest("hex"),
-      content
-    });
-  }
-
-  return snapshot;
-}
-
-function diffSnapshots(before: WorkspaceSnapshot, after: WorkspaceSnapshot) {
-  const paths = new Set([...before.keys(), ...after.keys()]);
-  return [...paths].filter((relativePath) => before.get(relativePath)?.hash !== after.get(relativePath)?.hash).sort();
+async function snapshotProjectWorkspace(projectRoot: string): Promise<WorkspaceSnapshot> {
+  return snapshotWorkspace(projectRoot, WORKSPACE_IGNORED_DIRECTORIES);
 }
 
 function changedFilesFromExecutions(executions: CommandExecution[]) {
@@ -670,18 +547,6 @@ function appendSummary(current: string | undefined, addition: string) {
   return current ? `${current} ${addition}` : addition;
 }
 
-function exitCodeFromError(error: ExecFileException | null) {
-  if (!error) {
-    return 0;
-  }
-
-  return typeof error.code === "number" ? error.code : 1;
-}
-
-function stringifyOutput(output: string | Buffer) {
-  return Buffer.isBuffer(output) ? output.toString("utf8") : output;
-}
-
 function hasExtension(relativePath: string, extensions: string[]) {
   const extension = path.posix.extname(relativePath).toLowerCase();
   return extensions.includes(extension);
@@ -697,12 +562,4 @@ function basenameStartsWith(relativePath: string, prefix: string) {
 
 function toProjectRelative(projectRoot: string, filePath: string) {
   return path.relative(projectRoot, filePath).split(path.sep).join("/");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasErrorCode(error: unknown, code: string): error is NodeJS.ErrnoException {
-  return typeof error === "object" && error !== null && "code" in error && error.code === code;
 }

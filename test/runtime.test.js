@@ -256,6 +256,16 @@ function nodeGate(id, source, overrides = {}) {
   };
 }
 
+function nodeTestCommand(id, source, overrides = {}) {
+  return {
+    id,
+    name: id,
+    command: `node -e ${id}`,
+    argv: [process.execPath, "-e", source],
+    ...overrides
+  };
+}
+
 function parallelBarrierScript(barrierDir, readyFile, peerFile) {
   return `
 const fs = require("node:fs");
@@ -482,6 +492,271 @@ test("static_check serializes writer gates and reports changed files", async () 
   );
   assert.equal((await readFile(readOnlyLogPath, "utf8")).trim().split("\n").length, 2);
   assert.deepEqual(report.changed_files, ["static-check-counter.txt"]);
+});
+
+test("test_check discovers and runs repository test commands", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          test: "node test-pass.js"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  await writeText(cwd, "test-pass.js", "console.log('package tests passed');\n");
+
+  const runState = await createRun(cwd, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() });
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+
+  assert.equal(report.status, "success");
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.command, command.status, command.exit_code]),
+    [["Test", "npm run test", "success", 0]]
+  );
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.changed_files, []);
+
+  const outputPath = path.join(runState.artifactPath, "test_check", "test-output.json");
+  assert.ok(report.artifacts.includes(outputPath));
+  const output = await readJson(cwd, outputPath);
+  assert.match(output.commands[0].stdout, /package tests passed/);
+});
+
+test("test_check runs configured test commands", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createMockRuntimeAdapter({
+      testCheck: {
+        commands: [
+          nodeTestCommand("configured-tests", "console.log('configured tests passed');", {
+            name: "Configured Tests"
+          })
+        ]
+      }
+    })
+  });
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+
+  assert.equal(report.status, "success");
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.command, command.status, command.exit_code]),
+    [["Configured Tests", "node -e configured-tests", "success", 0]]
+  );
+});
+
+test("test_check fails with command metadata and findings when tests fail", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          test: "node test-fail.js"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  await writeText(cwd, "test-fail.js", "console.error('expected failure detail'); process.exit(7);\n");
+
+  await assert.rejects(
+    () => createRun(cwd, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() }),
+    /Stage "test_check" command failed: npm run test/
+  );
+
+  const [runState] = await readRuns(cwd);
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[1].status, "failed");
+  assert.equal(runState.stages[1].failure.kind, "command_failure");
+  assert.deepEqual(runState.stages[1].failure.metadata, {
+    command: "npm run test",
+    exitCode: 7
+  });
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+  assert.equal(report.status, "failed");
+  assert.deepEqual(report.commands.map((command) => [command.name, command.status, command.exit_code]), [
+    ["Test", "failed", 7]
+  ]);
+  assert.deepEqual(report.findings, [
+    {
+      severity: "blocker",
+      source: "test",
+      message: "expected failure detail"
+    }
+  ]);
+});
+
+test("test_check blocks expectation-updating test commands", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          test: "node -e \"require('node:fs').writeFileSync('should-not-run.txt', 'updated')\" -- --updateSnapshot"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+
+  await assert.rejects(
+    () => createRun(cwd, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() }),
+    /reported blocker/
+  );
+  await assert.rejects(() => readFile(path.join(cwd, "should-not-run.txt"), "utf8"), { code: "ENOENT" });
+
+  const [runState] = await readRuns(cwd);
+  assert.equal(runState.stages[1].failure.kind, "human_required_blocker");
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+  assert.deepEqual(report.commands, [
+    {
+      name: "Test",
+      command: "npm run test",
+      status: "skipped",
+      reason: "Command appears to update snapshots, generated expectations, or test assertions."
+    }
+  ]);
+  assert.deepEqual(report.blockers, [
+    {
+      type: "human_required",
+      message: "Refusing to run expectation-updating test command: npm run test."
+    }
+  ]);
+});
+
+test("test_check blocks configured update flags and Makefile update recipes", async () => {
+  const configured = await tempProject();
+  await initializeProject(configured);
+
+  await assert.rejects(
+    () =>
+      createRun(configured, "mr-preflight", {
+        runtimeAdapter: createMockRuntimeAdapter({
+          testCheck: {
+            commands: [
+              nodeTestCommand("configured-update", "console.log('should not run');", {
+                name: "Configured Update",
+                command: "npm test",
+                argv: [process.execPath, "-e", "console.log('should not run')", "--updateSnapshot"]
+              })
+            ]
+          }
+        })
+      }),
+    /reported blocker/
+  );
+  const [configuredRun] = await readRuns(configured);
+  const configuredReport = await readJson(
+    configured,
+    path.join(configuredRun.artifactPath, "test_check", "stage-report.json")
+  );
+  assert.deepEqual(configuredReport.commands, [
+    {
+      name: "Configured Update",
+      command: "npm test",
+      status: "skipped",
+      reason: "Command appears to update snapshots, generated expectations, or test assertions."
+    }
+  ]);
+
+  const makeProject = await tempProject();
+  await initializeProject(makeProject);
+  await writeText(makeProject, "Makefile", "test:\n\tjest -u\n");
+
+  await assert.rejects(
+    () => createRun(makeProject, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() }),
+    /reported blocker/
+  );
+  const [makeRun] = await readRuns(makeProject);
+  const makeReport = await readJson(makeProject, path.join(makeRun.artifactPath, "test_check", "stage-report.json"));
+  assert.deepEqual(makeReport.blockers, [
+    {
+      type: "human_required",
+      message: "Refusing to run expectation-updating test command: make test."
+    }
+  ]);
+});
+
+test("test_check fails when a safe-looking test mutates expectations", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          test: "node test-mutates.js"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  await writeText(cwd, "snapshot.txt", "old\n");
+  await writeText(cwd, "test-mutates.js", "require('node:fs').writeFileSync('snapshot.txt', 'new\\n');\n");
+
+  await assert.rejects(
+    () => createRun(cwd, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() }),
+    /Stage "test_check" command failed: npm run test/
+  );
+
+  assert.equal(await readFile(path.join(cwd, "snapshot.txt"), "utf8"), "old\n");
+
+  const [runState] = await readRuns(cwd);
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+  assert.equal(report.commands[0].status, "failed");
+  assert.match(report.commands[0].summary, /changed files in isolated workspace: snapshot\.txt/);
+  assert.deepEqual(report.changed_files, []);
+});
+
+test("test_check permits benign isolated test artifacts", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          test: "node test-writes-temp.js"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  await writeText(
+    cwd,
+    "test-writes-temp.js",
+    "require('node:fs').mkdirSync('tmp', { recursive: true }); require('node:fs').writeFileSync('tmp/output.txt', 'ok\\n');\n"
+  );
+
+  const runState = await createRun(cwd, "mr-preflight", { runtimeAdapter: createMockRuntimeAdapter() });
+
+  assert.equal(runState.status, "success");
+  await assert.rejects(() => readFile(path.join(cwd, "tmp", "output.txt"), "utf8"), { code: "ENOENT" });
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"));
+  assert.equal(report.commands[0].status, "success");
+  assert.deepEqual(report.changed_files, []);
 });
 
 test("runtime fails a stage when the stage report violates the built-in schema", async () => {

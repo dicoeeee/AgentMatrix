@@ -326,6 +326,21 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
       );
       assert.deepEqual(stageReport.findings, []);
       assert.deepEqual(stageReport.skipped, []);
+    } else if (stage.id === "mr_prepare") {
+      assert.equal(stageReport.summary, "Generated MR title and description from 3 prior stage reports.");
+      assert.deepEqual(stageReport.commands, []);
+      assert.deepEqual(stageReport.findings, []);
+      assert.deepEqual(stageReport.skipped, []);
+      assert.equal(
+        await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "title.md"), "utf8"),
+        "MR: validation passed\n"
+      );
+      const description = await readFile(
+        path.join(cwd, runState.artifactPath, "mr_prepare", "description.md"),
+        "utf8"
+      );
+      assert.match(description, /Generated from 3 workflow stage reports\./);
+      assert.match(description, /No MR, PR, reviewer, label, push, or CI-watch action was performed\./);
     } else {
       assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
       assert.deepEqual(stageReport.skipped, []);

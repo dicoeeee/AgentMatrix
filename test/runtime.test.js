@@ -980,6 +980,160 @@ test("code_review blocks when required prior evidence is missing", async () => {
   );
 });
 
+test("mr_prepare generates MR title and description from successful prior stage reports", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  const titlePath = path.join(runState.artifactPath, "mr_prepare", "title.md");
+  const descriptionPath = path.join(runState.artifactPath, "mr_prepare", "description.md");
+  const reportPath = path.join(runState.artifactPath, "mr_prepare", "stage-report.json");
+
+  assert.equal(await readFile(path.join(cwd, titlePath), "utf8"), "MR: validation passed\n");
+
+  const description = await readFile(path.join(cwd, descriptionPath), "utf8");
+  assert.match(description, /## Summary/);
+  assert.match(description, /Generated from 3 workflow stage reports\./);
+  assert.match(description, /## Changes/);
+  assert.match(description, /No changed files were recorded\./);
+  assert.match(description, /## Validation/);
+  assert.match(description, /static_check: success/);
+  assert.match(description, /test_check: success/);
+  assert.match(description, /code_review: success/);
+  assert.match(description, /## Findings/);
+  assert.match(description, /No findings were recorded\./);
+  assert.match(description, /## Notes/);
+  assert.match(description, /No MR, PR, reviewer, label, push, or CI-watch action was performed\./);
+
+  const report = await readJson(cwd, reportPath);
+  assert.equal(report.status, "success");
+  assert.equal(report.summary, "Generated MR title and description from 3 prior stage reports.");
+  assert.deepEqual(report.commands, []);
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.blockers, []);
+  assert.deepEqual(report.changed_files, []);
+  assert.deepEqual(report.artifacts, [reportPath, titlePath, descriptionPath]);
+});
+
+test("mr_prepare summarizes failed or skipped prior stage reports", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  await writeJson(cwd, path.join(runState.artifactPath, "static_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "static_check",
+      status: "skipped",
+      summary: "Static checks skipped by fixture.",
+      skipped: [{ id: "static-gates", reason: "No static gates were configured." }],
+      skip_reason: "No static gates were configured."
+    })
+  });
+  await writeJson(cwd, path.join(runState.artifactPath, "test_check", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "test_check",
+      summary: "Tests passed with a fixture command.",
+      commands: [
+        {
+          name: "Unit Tests",
+          command: "npm test",
+          status: "success",
+          exit_code: 0,
+          summary: "Fixture tests passed."
+        }
+      ],
+      changed_files: ["src/app.ts"]
+    })
+  });
+  await writeJson(cwd, path.join(runState.artifactPath, "code_review", "stage-report.json"), {
+    ...stageReport({
+      run_id: runState.id,
+      stage_id: "code_review",
+      status: "failed",
+      summary: "Review found a regression.",
+      findings: [
+        {
+          severity: "major",
+          source: "review",
+          root_cause: "null-handling",
+          message: "src/app.ts misses null handling."
+        }
+      ]
+    })
+  });
+  await rewindFromStage(cwd, runState, "mr_prepare");
+
+  const resumed = await resumeRun(cwd, runState.id, { runtimeAdapter: createMockRuntimeAdapter() });
+
+  assert.equal(resumed.status, "success");
+  assert.equal(
+    await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "title.md"), "utf8"),
+    "MR: validation needs attention\n"
+  );
+
+  const description = await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "description.md"), "utf8");
+  assert.match(description, /static_check: skipped - Static checks skipped by fixture\./);
+  assert.match(description, /test_check: success - Tests passed with a fixture command\./);
+  assert.match(description, /code_review: failed - Review found a regression\./);
+  assert.match(description, /src\/app\.ts/);
+  assert.match(description, /src\/app\.ts misses null handling\./);
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "mr_prepare", "stage-report.json"));
+  assert.equal(report.status, "success");
+  assert.deepEqual(report.findings, [
+    {
+      stage_id: "code_review",
+      severity: "major",
+      source: "review",
+      root_cause: "null-handling",
+      message: "src/app.ts misses null handling."
+    }
+  ]);
+});
+
+test("mr_prepare blocks when required prior evidence is missing", async () => {
+  const { cwd, runState } = await createCompletedRun(createMockRuntimeAdapter());
+  const missingReportPath = path.join(runState.artifactPath, "static_check", "stage-report.json");
+  await rm(path.join(cwd, missingReportPath));
+  await rewindFromStage(cwd, runState, "mr_prepare");
+
+  await assert.rejects(
+    () => resumeRun(cwd, runState.id, { runtimeAdapter: createMockRuntimeAdapter() }),
+    /Stage "mr_prepare" reported blocker: Required input "static_check_report" is missing/
+  );
+
+  const [resumed] = await readRuns(cwd);
+  const mrPrepare = resumed.stages.find((stage) => stage.id === "mr_prepare");
+  assert.equal(mrPrepare.status, "failed");
+  assert.equal(mrPrepare.failure.kind, "missing_resource");
+  assert.deepEqual(mrPrepare.failure.metadata, {
+    blockerType: "missing_resource",
+    blockerMessage: `Required input "static_check_report" is missing or unreadable at ${missingReportPath}.`,
+    resource: missingReportPath
+  });
+
+  assert.equal(
+    await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "title.md"), "utf8"),
+    "MR preparation blocked\n"
+  );
+
+  const description = await readFile(path.join(cwd, runState.artifactPath, "mr_prepare", "description.md"), "utf8");
+  assert.match(description, /Required input "static_check_report" is missing or unreadable/);
+  assert.match(description, /No MR, PR, reviewer, label, push, or CI-watch action was performed\./);
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "mr_prepare", "stage-report.json"));
+  assert.equal(report.status, "failed");
+  assert.deepEqual(report.commands, []);
+  assert.deepEqual(report.blockers, [
+    {
+      type: "missing_resource",
+      message: `Required input "static_check_report" is missing or unreadable at ${missingReportPath}.`,
+      resource: missingReportPath
+    }
+  ]);
+  assert.deepEqual(report.artifacts, [
+    path.join(runState.artifactPath, "mr_prepare", "stage-report.json"),
+    path.join(runState.artifactPath, "mr_prepare", "title.md"),
+    path.join(runState.artifactPath, "mr_prepare", "description.md")
+  ]);
+});
+
 test("runtime fails a stage when the stage report violates the built-in schema", async () => {
   const invalidReport = stageReport();
   delete invalidReport.commands;

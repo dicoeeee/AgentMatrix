@@ -1,14 +1,7 @@
-import { readFile } from "node:fs/promises";
-import path from "node:path";
-
 import { writeProjectJson } from "./project-files.js";
-import {
-  parseStageReport,
-  type StageReport,
-  type StageReportBlocker,
-  type StageReportCommand
-} from "./stage-report.js";
-import type { RunStageState, StageExecutionContext, StageExecutionResult, WorkflowInput } from "./types.js";
+import { readRequiredStageInputReports, type StageInputReport } from "./stage-input-reports.js";
+import type { StageReport, StageReportBlocker, StageReportCommand } from "./stage-report.js";
+import type { StageExecutionContext, StageExecutionResult } from "./types.js";
 
 type ReviewLaneId = "correctness" | "security" | "maintainability" | "performance" | "data" | "api";
 type ReviewSeverity = "critical" | "major" | "minor" | "info";
@@ -17,13 +10,6 @@ interface ReviewLane {
   id: ReviewLaneId;
   name: string;
   aliases: string[];
-}
-
-interface PriorStageReport {
-  inputId: string;
-  stageId: string;
-  path: string;
-  report: StageReport;
 }
 
 interface ReviewEvidenceLink {
@@ -100,7 +86,7 @@ const SEVERITY_RANK: Record<ReviewSeverity, number> = {
 const SOURCE_STAGE_ORDER = ["static_check", "test_check", "code_review"];
 
 export async function executeCodeReviewStage(context: StageExecutionContext): Promise<StageExecutionResult> {
-  const { reports, blockers } = await readRequiredPriorReports(context);
+  const { reports, blockers } = await readRequiredStageInputReports(context);
 
   if (blockers.length > 0) {
     await writeBlockedReview(context, blockers);
@@ -183,66 +169,7 @@ async function writeBlockedReview(context: StageExecutionContext, blockers: Stag
   await writeProjectJson(context.projectRoot, context.stageReportPath, report);
 }
 
-async function readRequiredPriorReports(context: StageExecutionContext) {
-  const reports: PriorStageReport[] = [];
-  const blockers: StageReportBlocker[] = [];
-  const inputs = context.stage.inputs.filter((input) => input.required && input.sourceStage && input.output);
-
-  for (const input of inputs) {
-    const sourceStage = context.runState.stages.find((stage) => stage.id === input.sourceStage);
-    const reportPath = sourceStage ? sourceOutputPath(context.runState.artifactPath, sourceStage, input) : undefined;
-
-    if (!sourceStage || !reportPath) {
-      blockers.push(missingInputBlocker(input, reportPath));
-      continue;
-    }
-
-    try {
-      const report = parseStageReport(await readFile(path.join(context.projectRoot, reportPath), "utf8"), reportPath);
-      assertPriorReportMatchesRun(context, report, sourceStage, reportPath);
-      reports.push({
-        inputId: input.id,
-        stageId: sourceStage.id,
-        path: reportPath,
-        report
-      });
-    } catch {
-      blockers.push(missingInputBlocker(input, reportPath));
-    }
-  }
-
-  return { reports, blockers };
-}
-
-function sourceOutputPath(artifactPath: string, sourceStage: RunStageState, input: WorkflowInput) {
-  const output = sourceStage.outputs.find((candidate) => candidate.id === input.output);
-  return output ? path.join(artifactPath, output.path) : undefined;
-}
-
-function assertPriorReportMatchesRun(
-  context: StageExecutionContext,
-  report: StageReport,
-  sourceStage: RunStageState,
-  reportPath: string
-) {
-  if (report.run_id !== context.runState.id) {
-    throw new Error(`Prior stage report ${reportPath} has the wrong run_id.`);
-  }
-
-  if (report.stage_id !== sourceStage.id) {
-    throw new Error(`Prior stage report ${reportPath} has the wrong stage_id.`);
-  }
-}
-
-function missingInputBlocker(input: WorkflowInput, reportPath: string | undefined): StageReportBlocker {
-  return {
-    type: "missing_resource",
-    message: `Required input "${input.id}" is missing or unreadable at ${reportPath ?? input.sourceStage ?? input.id}.`,
-    ...(reportPath ? { resource: reportPath } : {})
-  };
-}
-
-async function executeReviewLane(lane: ReviewLane, reports: PriorStageReport[]): Promise<ReviewLaneResult> {
+async function executeReviewLane(lane: ReviewLane, reports: StageInputReport[]): Promise<ReviewLaneResult> {
   const startedAt = Date.now();
   const findings = reports.flatMap((report) => findingsForLane(lane, report));
 
@@ -259,7 +186,7 @@ async function executeReviewLane(lane: ReviewLane, reports: PriorStageReport[]):
   };
 }
 
-function findingsForLane(lane: ReviewLane, priorReport: PriorStageReport) {
+function findingsForLane(lane: ReviewLane, priorReport: StageInputReport) {
   const findingDrafts = priorReport.report.findings
     .filter((finding) => findingMatchesLane(lane, priorReport, finding))
     .map((finding) => reviewFindingFromReportFinding(lane, priorReport, finding));
@@ -271,7 +198,7 @@ function findingsForLane(lane: ReviewLane, priorReport: PriorStageReport) {
   return [...findingDrafts, ...commandDrafts];
 }
 
-function findingMatchesLane(lane: ReviewLane, priorReport: PriorStageReport, finding: Record<string, unknown>) {
+function findingMatchesLane(lane: ReviewLane, priorReport: StageInputReport, finding: Record<string, unknown>) {
   const explicitLaneIds = classifyExplicitLaneIds(finding);
 
   if (explicitLaneIds.size > 0) {
@@ -293,7 +220,7 @@ function findingMatchesLane(lane: ReviewLane, priorReport: PriorStageReport, fin
   return false;
 }
 
-function commandMatchesLane(lane: ReviewLane, priorReport: PriorStageReport, command: StageReportCommand) {
+function commandMatchesLane(lane: ReviewLane, priorReport: StageInputReport, command: StageReportCommand) {
   const commandText = [command.name, command.command, command.summary].filter(Boolean).join(" ").toLowerCase();
 
   if (textMatchesLane(commandText, lane)) {
@@ -305,7 +232,7 @@ function commandMatchesLane(lane: ReviewLane, priorReport: PriorStageReport, com
 
 function reviewFindingFromReportFinding(
   lane: ReviewLane,
-  priorReport: PriorStageReport,
+  priorReport: StageInputReport,
   finding: Record<string, unknown>
 ): ReviewFindingDraft {
   const message = stringField(finding, ["message", "summary", "description"]) ?? "Prior evidence reported a risk.";
@@ -327,7 +254,7 @@ function reviewFindingFromReportFinding(
 
 function reviewFindingFromCommand(
   lane: ReviewLane,
-  priorReport: PriorStageReport,
+  priorReport: StageInputReport,
   command: StageReportCommand
 ): ReviewFindingDraft {
   const message = command.summary ?? `${priorReport.stageId} command failed: ${command.command}.`;

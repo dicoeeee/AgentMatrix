@@ -7,10 +7,14 @@ export type StageCommandStatus = "success" | "failed" | "skipped";
 export type StageBlockerType = "missing_resource" | "human_required" | "external_required";
 
 export interface StageReportCommand {
+  name?: string;
   command: string;
   status: StageCommandStatus;
   exit_code?: number;
   summary?: string;
+  parallel_group?: string;
+  duration_ms?: number;
+  reason?: string;
 }
 
 export interface StageReportBlocker {
@@ -81,6 +85,10 @@ const STAGE_REPORT_SCHEMA: AnySchema = {
         required: ["command", "status"],
         additionalProperties: false,
         properties: {
+          name: {
+            type: "string",
+            minLength: 1
+          },
           command: {
             type: "string",
             minLength: 1
@@ -94,6 +102,18 @@ const STAGE_REPORT_SCHEMA: AnySchema = {
           },
           summary: {
             type: "string"
+          },
+          parallel_group: {
+            type: "string",
+            minLength: 1
+          },
+          duration_ms: {
+            type: "integer",
+            minimum: 0
+          },
+          reason: {
+            type: "string",
+            minLength: 1
           }
         }
       }

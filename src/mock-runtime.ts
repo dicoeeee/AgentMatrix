@@ -1,15 +1,24 @@
-import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { writeProjectJson, writeProjectText } from "./project-files.js";
+import { executeStaticCheckStage, type StaticCheckOptions } from "./static-check.js";
 import type { WorkflowOutput, WorkflowRuntimeAdapter } from "./types.js";
 
-export function createMockRuntimeAdapter(): WorkflowRuntimeAdapter {
+export interface MockRuntimeOptions {
+  staticCheck?: StaticCheckOptions;
+}
+
+export function createMockRuntimeAdapter(options: MockRuntimeOptions = {}): WorkflowRuntimeAdapter {
   return {
     async executeStage(context) {
+      if (context.stage.id === "static_check") {
+        return executeStaticCheckStage(context, options.staticCheck);
+      }
+
       const outputArtifacts = context.stage.outputs.map((output) =>
         path.join(context.runState.artifactPath, output.path)
       );
-      await writeJson(context.projectRoot, context.executorEvidencePath, {
+      await writeProjectJson(context.projectRoot, context.executorEvidencePath, {
         schema_version: 1,
         run_id: context.runState.id,
         stage_id: context.stage.id,
@@ -18,7 +27,7 @@ export function createMockRuntimeAdapter(): WorkflowRuntimeAdapter {
         summary: `Mock executor completed ${context.stage.id}.`,
         outputs: [{ id: "stage_report", path: context.stageReportPath }]
       });
-      await writeJson(context.projectRoot, context.stageReportPath, {
+      await writeProjectJson(context.projectRoot, context.stageReportPath, {
         schema_version: 1,
         run_id: context.runState.id,
         stage_id: context.stage.id,
@@ -44,7 +53,7 @@ export function createMockRuntimeAdapter(): WorkflowRuntimeAdapter {
       };
     },
     async verifyStage(context) {
-      await writeJson(context.projectRoot, context.verifierEvidencePath, {
+      await writeProjectJson(context.projectRoot, context.verifierEvidencePath, {
         schema_version: 1,
         run_id: context.runState.id,
         stage_id: context.stage.id,
@@ -62,18 +71,6 @@ export function createMockRuntimeAdapter(): WorkflowRuntimeAdapter {
   };
 }
 
-async function writeJson(projectRoot: string, relativePath: string, data: unknown) {
-  const filePath = path.join(projectRoot, relativePath);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, JSON.stringify(data, null, 2) + "\n");
-}
-
-async function writeText(projectRoot: string, relativePath: string, data: string) {
-  const filePath = path.join(projectRoot, relativePath);
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, data);
-}
-
 async function writeAdditionalOutputs(
   projectRoot: string,
   outputs: WorkflowOutput[],
@@ -86,7 +83,7 @@ async function writeAdditionalOutputs(
       continue;
     }
 
-    await writeText(projectRoot, outputPath, mockOutput(output.id));
+    await writeProjectText(projectRoot, outputPath, mockOutput(output.id));
   }
 }
 

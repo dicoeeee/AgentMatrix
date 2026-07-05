@@ -282,8 +282,25 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
     const stageReport = await readProjectJson(cwd, stage.artifacts[0]);
     assert.equal(stageReport.stage_id, stage.id);
     assert.equal(stageReport.status, "success");
-    assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
-    assert.deepEqual(stageReport.skipped, []);
+    if (stage.id === "static_check") {
+      assert.equal(stageReport.summary, "Static check found no runnable static gates.");
+      assert.deepEqual(stageReport.commands, []);
+      assert.deepEqual(stageReport.skipped, [
+        {
+          id: "static-gates",
+          reason: "No static check gates were discovered."
+        }
+      ]);
+      assert.ok(stageReport.artifacts.includes(path.join(runState.artifactPath, "static_check", "language-references.json")));
+      assert.deepEqual(
+        (await readProjectJson(cwd, path.join(runState.artifactPath, "static_check", "language-references.json")))
+          .languages,
+        []
+      );
+    } else {
+      assert.equal(stageReport.summary, `Mock executor completed ${stage.id}.`);
+      assert.deepEqual(stageReport.skipped, []);
+    }
     assert.deepEqual(stageReport.changed_files, []);
     assert.deepEqual(stageReport.blockers, []);
 

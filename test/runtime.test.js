@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
 import { createRun, initializeProject, readRuns, resumeRun } from "../dist/storage.js";
+
+import { createMockRuntimeAdapter } from "../dist/mock-runtime.js";
 
 async function tempProject() {
   const root = path.join(tmpdir(), `agentmatrix-runtime-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -16,6 +18,16 @@ async function writeJson(projectRoot, relativePath, data) {
   const filePath = path.join(projectRoot, relativePath);
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, JSON.stringify(data, null, 2) + "\n");
+}
+
+async function readJson(projectRoot, relativePath) {
+  return JSON.parse(await readFile(path.join(projectRoot, relativePath), "utf8"));
+}
+
+async function writeText(projectRoot, relativePath, data) {
+  const filePath = path.join(projectRoot, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, data);
 }
 
 async function writeRunState(projectRoot, runState) {
@@ -232,6 +244,59 @@ function assertAllStagesSuccessful(runState) {
   );
 }
 
+function nodeGate(id, source, overrides = {}) {
+  return {
+    id,
+    name: id,
+    command: `node -e ${id}`,
+    argv: [process.execPath, "-e", source],
+    mode: "read-only",
+    kind: "lint",
+    ...overrides
+  };
+}
+
+function parallelBarrierScript(barrierDir, readyFile, peerFile) {
+  return `
+const fs = require("node:fs");
+const path = require("node:path");
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+(async () => {
+  const dir = ${JSON.stringify(barrierDir)};
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "${readyFile}"), "ready\\n");
+  const peerPath = path.join(dir, "${peerFile}");
+  const startedAt = Date.now();
+  while (!fs.existsSync(peerPath)) {
+    if (Date.now() - startedAt > 1500) {
+      process.exit(23);
+    }
+    await wait(20);
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+`;
+}
+
+function serializedIncrementScript(fileName) {
+  return `
+const fs = require("node:fs");
+const path = require("node:path");
+const filePath = path.join(process.cwd(), "${fileName}");
+const before = Number(fs.readFileSync(filePath, "utf8"));
+setTimeout(() => {
+  fs.writeFileSync(filePath, String(before + 1) + "\\n");
+}, 100);
+`;
+}
+
+function recordRunScript(logPath) {
+  return `require("node:fs").appendFileSync(${JSON.stringify(logPath)}, "run\\n");`;
+}
+
 test("runtime stops before the next stage when verifier rejects evidence", async () => {
   const cwd = await tempProject();
   await initializeProject(cwd);
@@ -263,6 +328,160 @@ test("runtime stops before the next stage when verifier rejects evidence", async
     ]
   );
   assert.equal(runState.stages[0].failure.kind, "verifier_failure");
+});
+
+test("static_check aggregates read-only gates in parallel and records language references", async () => {
+  const cwd = await tempProject();
+  const barrierDir = path.join(tmpdir(), `agentmatrix-static-check-barrier-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  await initializeProject(cwd);
+  await writeText(cwd, "package.json", JSON.stringify({ scripts: {} }, null, 2) + "\n");
+  await writeText(cwd, "src/index.ts", "export const value: number = 1;\n");
+  await writeText(cwd, "src/index.js", "export const value = 1;\n");
+  await writeText(cwd, "native/main.c", "int main(void) { return 0; }\n");
+  await writeText(cwd, "native/main.cpp", "int main() { return 0; }\n");
+  await writeText(cwd, "java/Main.java", "class Main {}\n");
+  await writeText(cwd, "go.mod", "module example.com/agentmatrix\n");
+  await writeText(cwd, "Cargo.toml", "[package]\nname = \"agentmatrix-fixture\"\nversion = \"0.1.0\"\n");
+  await writeText(cwd, "script.py", "print('ok')\n");
+  await writeText(cwd, "scripts/check.sh", "#!/bin/sh\nexit 0\n");
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createMockRuntimeAdapter({
+      staticCheck: {
+        gates: [
+          nodeGate("lint", parallelBarrierScript(barrierDir, "lint.ready", "typecheck.ready"), {
+            name: "Lint",
+            kind: "lint"
+          }),
+          nodeGate("typecheck", parallelBarrierScript(barrierDir, "typecheck.ready", "lint.ready"), {
+            name: "Typecheck",
+            kind: "typecheck"
+          }),
+          nodeGate("security", "", {
+            name: "Security Scan",
+            kind: "security"
+          }),
+          nodeGate("dependency", "", {
+            name: "Dependency Scan",
+            kind: "dependency"
+          })
+        ]
+      }
+    })
+  });
+
+  const stageReportPath = path.join(runState.artifactPath, "static_check", "stage-report.json");
+  const report = await readJson(cwd, stageReportPath);
+  assert.equal(report.status, "success");
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.status, command.parallel_group]),
+    [
+      ["Lint", "success", "read-only-1"],
+      ["Typecheck", "success", "read-only-1"],
+      ["Security Scan", "success", "read-only-1"],
+      ["Dependency Scan", "success", "read-only-1"]
+    ]
+  );
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.skipped, []);
+  assert.deepEqual(report.changed_files, []);
+
+  const referencesPath = path.join(runState.artifactPath, "static_check", "language-references.json");
+  assert.ok(report.artifacts.includes(referencesPath));
+  const references = await readJson(cwd, referencesPath);
+  assert.deepEqual(
+    references.languages.map((language) => [language.id, language.reference]),
+    [
+      ["c", "static-check/references/c.md"],
+      ["cpp", "static-check/references/cpp.md"],
+      ["java", "static-check/references/java.md"],
+      ["go", "static-check/references/go.md"],
+      ["rust", "static-check/references/rust.md"],
+      ["javascript", "static-check/references/javascript.md"],
+      ["typescript", "static-check/references/typescript.md"],
+      ["python", "static-check/references/python.md"],
+      ["shell", "static-check/references/shell.md"]
+    ]
+  );
+});
+
+test("static_check isolates read-only gates from workspace writes", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createMockRuntimeAdapter({
+      staticCheck: {
+        gates: [
+          nodeGate(
+            "mutating-read-only",
+            'require("node:fs").writeFileSync("unexpected-write.txt", "mutation\\n");',
+            {
+              name: "Mutating Read-only Gate",
+              kind: "lint"
+            }
+          )
+        ]
+      }
+    })
+  });
+
+  await assert.rejects(() => readFile(path.join(cwd, "unexpected-write.txt"), "utf8"), { code: "ENOENT" });
+
+  assert.equal(runState.status, "success");
+
+  const report = await readJson(cwd, path.join(runState.artifactPath, "static_check", "stage-report.json"));
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.status]),
+    [["Mutating Read-only Gate", "success"]]
+  );
+  assert.deepEqual(report.changed_files, []);
+});
+
+test("static_check serializes writer gates and reports changed files", async () => {
+  const cwd = await tempProject();
+  const readOnlyLogPath = path.join(tmpdir(), `agentmatrix-static-check-rerun-${Date.now()}-${Math.random().toString(16).slice(2)}.log`);
+  await initializeProject(cwd);
+  await writeText(cwd, "static-check-counter.txt", "0\n");
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createMockRuntimeAdapter({
+      staticCheck: {
+        gates: [
+          nodeGate("lint", recordRunScript(readOnlyLogPath), {
+            name: "Lint",
+            kind: "lint"
+          }),
+          nodeGate("autofix-a", serializedIncrementScript("static-check-counter.txt"), {
+            name: "Autofix A",
+            kind: "formatter",
+            mode: "writer"
+          }),
+          nodeGate("autofix-b", serializedIncrementScript("static-check-counter.txt"), {
+            name: "Autofix B",
+            kind: "formatter",
+            mode: "writer"
+          })
+        ]
+      }
+    })
+  });
+
+  assert.equal((await readFile(path.join(cwd, "static-check-counter.txt"), "utf8")).trim(), "2");
+
+  const stageReportPath = path.join(runState.artifactPath, "static_check", "stage-report.json");
+  const report = await readJson(cwd, stageReportPath);
+  assert.deepEqual(
+    report.commands.map((command) => [command.name, command.status, command.parallel_group ?? null]),
+    [
+      ["Lint", "success", null],
+      ["Autofix A", "success", null],
+      ["Autofix B", "success", null],
+      ["Lint", "success", null]
+    ]
+  );
+  assert.equal((await readFile(readOnlyLogPath, "utf8")).trim().split("\n").length, 2);
+  assert.deepEqual(report.changed_files, ["static-check-counter.txt"]);
 });
 
 test("runtime fails a stage when the stage report violates the built-in schema", async () => {

@@ -11,6 +11,7 @@ import { parse } from "yaml";
 const execFileAsync = promisify(execFile);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = path.join(repoRoot, "dist", "cli.js");
+const { runCli: runCliInProcess } = await import("../dist/cli.js");
 
 async function tempProject() {
   const root = path.join(tmpdir(), `agentmatrix-cli-${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -1003,6 +1004,76 @@ test("visualize renders real run state statuses as Mermaid and JSON", async () =
   );
 });
 
+test("visualize auto-generates browser HTML for interactive Mermaid output", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+  const stdout = [];
+  const stderr = [];
+  const previousDisableOpen = process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+  process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = "1";
+
+  try {
+    const code = await runCliInProcess(["--project", cwd, "visualize", runId], {
+      stdout: {
+        isTTY: true,
+        write(message) {
+          stdout.push(message);
+        }
+      },
+      stderr: {
+        write(message) {
+          stderr.push(message);
+        }
+      }
+    });
+
+    assert.equal(code, 0, stderr.join(""));
+  } finally {
+    if (previousDisableOpen === undefined) {
+      delete process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+    } else {
+      process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = previousDisableOpen;
+    }
+  }
+
+  assert.match(stdout.join(""), /graph TD/);
+  assert.match(stderr.join(""), /Wrote visualization HTML: \.agentmatrix\/visualizations\/run-/);
+
+  const htmlPath = path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`);
+  assert.equal(await exists(htmlPath), true);
+  const html = await readFile(htmlPath, "utf8");
+  assert.match(html, /<title>AgentMatrix run/);
+  assert.match(html, /class="mermaid diagram"/);
+  assert.match(html, /static_check \(success\)/);
+  assert.match(html, /mermaid@11/);
+});
+
+test("visualize --no-open suppresses interactive browser HTML generation", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+  const stdout = [];
+  const stderr = [];
+
+  const code = await runCliInProcess(["--project", cwd, "visualize", runId, "--no-open"], {
+    stdout: {
+      isTTY: true,
+      write(message) {
+        stdout.push(message);
+      }
+    },
+    stderr: {
+      write(message) {
+        stderr.push(message);
+      }
+    }
+  });
+
+  assert.equal(code, 0, stderr.join(""));
+  assert.match(stdout.join(""), /graph TD/);
+  assert.equal(stderr.join(""), "");
+  assert.equal(await exists(path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`)), false);
+});
+
 test("run validation reports malformed YAML and unsupported workflow status from temporary projects", async () => {
   const malformed = await tempProject();
   assert.equal((await runCli(["init"], malformed)).code, 0);
@@ -1119,4 +1190,8 @@ test("CLI parse failures use a predictable non-zero exit code", async () => {
   const missingWorkflow = await runCli(["visualize", "--workflow", "--format", "json"], cwd);
   assert.equal(missingWorkflow.code, 2);
   assert.match(missingWorkflow.stderr, /Missing value for --workflow/);
+
+  const jsonOpen = await runCli(["visualize", "--format", "json", "--open"], cwd);
+  assert.equal(jsonOpen.code, 2);
+  assert.match(jsonOpen.stderr, /Cannot combine --open with --format json/);
 });

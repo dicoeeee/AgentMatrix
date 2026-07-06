@@ -1,5 +1,7 @@
 #!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -21,10 +23,10 @@ import {
 } from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
 import { AGENTMATRIX_DIR, type RunState, type StageFailureMetadata } from "./types.js";
-import { runToGraph, runToMermaid, workflowToGraph, workflowToMermaid } from "./visualize.js";
+import { mermaidToHtml, runToGraph, runToMermaid, workflowToGraph, workflowToMermaid } from "./visualize.js";
 
 interface CliIo {
-  stdout: { write(message: string): void };
+  stdout: { write(message: string): void; isTTY?: boolean };
   stderr: { write(message: string): void };
 }
 
@@ -34,6 +36,7 @@ interface GlobalParseResult {
 }
 
 type VisualizationFormat = "mermaid" | "json";
+type VisualizationOpenMode = "auto" | "always" | "never";
 type RuntimeKind = "mock" | "opencode";
 type VisualizationTarget =
   | {
@@ -122,8 +125,12 @@ Usage:
 Render a workflow definition or run graph as Mermaid or JSON.
 
 Usage:
-  agentmatrix [--project <dir>] visualize [run-id] [--format mermaid|json]
-  agentmatrix [--project <dir>] visualize --workflow mr-preflight [--format mermaid|json]
+  agentmatrix [--project <dir>] visualize [run-id] [--format mermaid|json] [--open|--no-open]
+  agentmatrix [--project <dir>] visualize --workflow mr-preflight [--format mermaid|json] [--open|--no-open]
+
+Options:
+  --open      Generate an HTML visualization and open it in the default browser
+  --no-open   Suppress automatic browser opening for interactive Mermaid output
 `
 };
 
@@ -233,7 +240,7 @@ async function handleStatus(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
-  const { target, format } = parseVisualizeArgs(args);
+  const { target, format, openMode } = parseVisualizeArgs(args);
 
   if (target.kind === "workflow") {
     const workflow = await readWorkflowForDisplay(projectRoot, target.workflowId);
@@ -242,7 +249,13 @@ async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
       return;
     }
 
-    io.stdout.write(workflowToMermaid(workflow));
+    const mermaid = workflowToMermaid(workflow);
+    io.stdout.write(mermaid);
+    await maybeOpenVisualizationHtml(projectRoot, io, openMode, {
+      title: `AgentMatrix workflow ${workflow.id}`,
+      fileStem: `workflow-${workflow.id}`,
+      mermaid
+    });
     return;
   }
 
@@ -253,7 +266,13 @@ async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
     return;
   }
 
-  io.stdout.write(runToMermaid(runState));
+  const mermaid = runToMermaid(runState);
+  io.stdout.write(mermaid);
+  await maybeOpenVisualizationHtml(projectRoot, io, openMode, {
+    title: `AgentMatrix run ${runState.id}`,
+    fileStem: `run-${runState.id}`,
+    mermaid
+  });
 }
 
 function parseGlobalOptions(argv: string[]): GlobalParseResult {
@@ -503,6 +522,7 @@ function parseStatusArgs(args: string[]) {
 
 function parseVisualizeArgs(args: string[]) {
   let format: VisualizationFormat = "mermaid";
+  let openMode: VisualizationOpenMode = "auto";
   let workflowId: string | undefined;
   const positionals: string[] = [];
 
@@ -543,6 +563,16 @@ function parseVisualizeArgs(args: string[]) {
       continue;
     }
 
+    if (token === "--open") {
+      openMode = "always";
+      continue;
+    }
+
+    if (token === "--no-open") {
+      openMode = "never";
+      continue;
+    }
+
     rejectOptionToken(token, "visualize");
 
     positionals.push(token);
@@ -556,6 +586,10 @@ function parseVisualizeArgs(args: string[]) {
     throw new CliUsageError('Command "visualize" cannot combine --workflow with a run-id.');
   }
 
+  if (format === "json" && openMode === "always") {
+    throw new CliUsageError("Cannot combine --open with --format json.");
+  }
+
   return {
     target: workflowId
       ? {
@@ -566,7 +600,8 @@ function parseVisualizeArgs(args: string[]) {
           kind: "run" as const,
           runId: positionals[0]
         },
-    format
+    format,
+    openMode
   };
 }
 
@@ -618,6 +653,69 @@ function rejectOptionToken(token: string, command: string) {
 
 function rejectUnexpectedPositional(token: string, command: string) {
   throw new CliUsageError(`Command "${command}" does not accept positional argument "${token}".`);
+}
+
+async function maybeOpenVisualizationHtml(
+  projectRoot: string,
+  io: CliIo,
+  openMode: VisualizationOpenMode,
+  visualization: { title: string; fileStem: string; mermaid: string }
+) {
+  if (openMode === "never" || (openMode === "auto" && !io.stdout.isTTY)) {
+    return;
+  }
+
+  const htmlPath = await writeVisualizationHtml(projectRoot, visualization);
+  const opened = openHtmlFile(htmlPath);
+  const relativePath = path.relative(projectRoot, htmlPath);
+  io.stderr.write(`${opened ? "Opened" : "Wrote"} visualization HTML: ${relativePath}\n`);
+}
+
+async function writeVisualizationHtml(
+  projectRoot: string,
+  visualization: { title: string; fileStem: string; mermaid: string }
+) {
+  const visualizationsDir = path.join(projectRoot, AGENTMATRIX_DIR, "visualizations");
+  await mkdir(visualizationsDir, { recursive: true });
+  const htmlPath = path.join(visualizationsDir, `${safeFilePart(visualization.fileStem)}.html`);
+  await writeFile(htmlPath, mermaidToHtml(visualization.title, visualization.mermaid), "utf8");
+  return htmlPath;
+}
+
+function openHtmlFile(htmlPath: string) {
+  if (process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN === "1") {
+    return false;
+  }
+
+  const fileUrl = pathToFileURL(htmlPath).href;
+  const opener = browserOpenCommand(fileUrl);
+  if (!opener) {
+    return false;
+  }
+
+  const child = spawn(opener.command, opener.args, {
+    detached: true,
+    stdio: "ignore"
+  });
+  child.on("error", () => undefined);
+  child.unref();
+  return true;
+}
+
+function browserOpenCommand(fileUrl: string) {
+  if (process.platform === "darwin") {
+    return { command: "open", args: [fileUrl] };
+  }
+
+  if (process.platform === "win32") {
+    return { command: "rundll32", args: ["url.dll,FileProtocolHandler", fileUrl] };
+  }
+
+  return { command: "xdg-open", args: [fileUrl] };
+}
+
+function safeFilePart(value: string) {
+  return value.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "visualization";
 }
 
 function formatRuns(runs: RunState[]) {

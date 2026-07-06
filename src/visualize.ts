@@ -48,6 +48,71 @@ export function workflowToMermaid(workflow: WorkflowDefinition) {
   return graphToMermaid(workflowToGraph(workflow));
 }
 
+export function mermaidToHtml(title: string, mermaidSource: string) {
+  const escapedTitle = escapeHtml(title);
+  const escapedMermaid = escapeHtml(mermaidSource);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${escapedTitle}</title>
+  <style>
+    :root {
+      color: #172033;
+      background: #f6f8fb;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+    }
+
+    header {
+      border-bottom: 1px solid #d8dee8;
+      background: #ffffff;
+      padding: 24px 32px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    main {
+      padding: 32px;
+    }
+
+    .diagram {
+      min-height: 320px;
+      overflow: auto;
+      border: 1px solid #d8dee8;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 24px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>${escapedTitle}</h1>
+  </header>
+  <main>
+    <pre class="mermaid diagram">${escapedMermaid}</pre>
+  </main>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, securityLevel: "strict", theme: "base" });
+  </script>
+</body>
+</html>
+`;
+}
+
 function graphToMermaid(graph: VisualizationGraph) {
   const nodeNames = new Map(graph.nodes.map((node, index) => [node.id, `stage_${index}`]));
   const lines = ["graph TD"];
@@ -81,6 +146,14 @@ function graphToMermaid(graph: VisualizationGraph) {
 
 function escapeMermaidLabel(label: string) {
   return label.replace(/"/g, '\\"').replace(/\r?\n/g, "\\n");
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function stageEdges(stages: Array<{ id: string; dependsOn: string[] }>) {

@@ -36,3 +36,29 @@ The copied `mr-preflight` workflow is editable YAML. Its four linear stages are 
 Workflow YAML is validated before run/resume paths use it. Validation errors include the workflow file location and the specific field path that needs attention.
 
 `run` and `resume` also check required resources before changing run state. Required agent roles, skills, and MCP resources are derived from the workflow, and the default project-local provider reads `.agentmatrix/config.json` `availableResources`. Missing resources fail early with a message naming the missing items and pointing users toward the existing installer capability; AgentMatrix does not auto-install resources.
+
+## Testing
+
+The default test suite is offline and deterministic:
+
+```sh
+npm test
+```
+
+It does not require OpenCode or any configured model provider.
+
+To run the opt-in real OpenCode integration test, install and configure the `opencode` CLI locally, then run:
+
+```sh
+AGENTMATRIX_OPENCODE_INTEGRATION=1 npm run test:opencode
+```
+
+The integration test creates a temporary project, initializes the full `mr-preflight` workflow, writes deterministic test-only OpenCode agent templates for every execution and verifier role, and runs the real `opencode run` path through `agentmatrix run --runtime opencode`. It validates agent lookup, OpenCode CLI invocation, file writeback, and AgentMatrix run-state transitions.
+
+Optional environment variables:
+
+- `AGENTMATRIX_OPENCODE_BIN`: OpenCode executable path, default `opencode`.
+- `AGENTMATRIX_OPENCODE_MODEL`: provider/model value passed to `--opencode-model`.
+- `AGENTMATRIX_OPENCODE_ATTACH`: URL passed to `--opencode-attach`.
+- `AGENTMATRIX_OPENCODE_AUTO=0`: omit `--opencode-auto`; by default the integration test passes `--opencode-auto` inside the temporary project.
+- `AGENTMATRIX_OPENCODE_INTEGRATION_TIMEOUT_MS`: test and CLI timeout, default 20 minutes.

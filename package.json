@@ -15,6 +15,7 @@
     "test:cli": "node --test test/cli.test.js",
     "test:runtime": "node --test test/runtime.test.js",
     "test:workflow": "node --test test/workflow.test.js",
+    "test:opencode": "npm run build && node --test test/opencode-integration.test.js",
     "test": "npm run build && npm run test:cli && npm run test:runtime && npm run test:workflow",
     "check": "npm run typecheck && npm test"
   },

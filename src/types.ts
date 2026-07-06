@@ -139,6 +139,7 @@ export interface StageVerificationResult {
 }
 
 export interface WorkflowRuntimeAdapter {
+  validateProject?(projectRoot: string, workflow: WorkflowDefinition): Promise<void>;
   executeStage(context: StageExecutionContext): Promise<StageExecutionResult>;
   verifyStage(context: StageVerificationContext): Promise<StageVerificationResult>;
 }

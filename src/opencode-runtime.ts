@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { writeProjectJson } from "./project-files.js";
+import { assertOpencodeAgentDefinitionsAvailable } from "./opencode-agent-definitions.js";
 import type { StageReport } from "./stage-report.js";
 import type {
   StageExecutionContext,
@@ -39,6 +40,10 @@ export function createOpencodeRuntimeAdapter(options: OpencodeRuntimeOptions = {
   const timeoutMs = options.timeoutMs ?? DEFAULT_OPENCODE_TIMEOUT_MS;
 
   return {
+    async validateProject(projectRoot, workflow) {
+      await assertOpencodeAgentDefinitionsAvailable(projectRoot, workflow);
+    },
+
     async executeStage(context) {
       const prompt = stageExecutionPrompt(context);
       const result = await runOpencode({

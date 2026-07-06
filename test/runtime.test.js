@@ -25,6 +25,12 @@ async function readJson(projectRoot, relativePath) {
   return JSON.parse(await readFile(path.join(projectRoot, relativePath), "utf8"));
 }
 
+async function writeOpencodeJsonAgents(projectRoot, roles) {
+  await writeJson(projectRoot, "opencode.json", {
+    agent: Object.fromEntries(roles.map((role) => [role, { description: `Fixture ${role}` }]))
+  });
+}
+
 async function writeText(projectRoot, relativePath, data) {
   const filePath = path.join(projectRoot, relativePath);
   await mkdir(path.dirname(filePath), { recursive: true });
@@ -368,6 +374,19 @@ function assertAllStagesSuccessful(runState) {
   );
 }
 
+function workflowRoles() {
+  return [
+    "static_check",
+    "static_check_verifier",
+    "test_check",
+    "test_check_verifier",
+    "code_review",
+    "code_review_verifier",
+    "mr_prepare",
+    "mr_prepare_verifier"
+  ];
+}
+
 function nodeGate(id, source, overrides = {}) {
   return {
     id,
@@ -464,9 +483,55 @@ test("runtime stops before the next stage when verifier rejects evidence", async
   assert.equal(runState.stages[0].failure.kind, "verifier_failure");
 });
 
-test("opencode runtime invokes stage and verifier agents for each workflow stage", async () => {
+test("opencode runtime rejects missing platform agent definitions before creating a run", async () => {
   const cwd = await tempProject();
   await initializeProject(cwd);
+  const { executable } = await createFakeOpencode(cwd);
+
+  await assert.rejects(
+    () =>
+      createRun(cwd, "mr-preflight", {
+        runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+      }),
+    (error) => {
+      assert.match(error.message, /Missing OpenCode agent definitions/);
+      for (const role of workflowRoles()) {
+        assert.match(error.message, new RegExp(`agent: ${role}`));
+      }
+      assert.match(error.message, /\.opencode\/agents\/static_check\.md/);
+      assert.match(error.message, /opencode\.json agent\.static_check/);
+      assert.match(error.message, /agentmatrix init --platform opencode/);
+      return true;
+    }
+  );
+
+  assert.deepEqual(await readRuns(cwd), []);
+});
+
+test("opencode runtime rejects missing platform agent definitions before mutating a resumed run", async () => {
+  const { cwd, runState } = await createCompletedRun();
+  const failedRunState = await rewindFromStage(cwd, runState, "test_check");
+  const { executable } = await createFakeOpencode(cwd);
+
+  await assert.rejects(
+    () =>
+      resumeRun(cwd, failedRunState.id, {
+        runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+      }),
+    /Missing OpenCode agent definitions/
+  );
+
+  const [storedRunState] = await readRuns(cwd);
+  assert.deepEqual(storedRunState.events, failedRunState.events);
+  assert.deepEqual(
+    storedRunState.stages.map((stage) => [stage.id, stage.status]),
+    failedRunState.stages.map((stage) => [stage.id, stage.status])
+  );
+});
+
+test("opencode runtime invokes stage and verifier agents for each workflow stage", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd, "mr-preflight", { platform: "opencode" });
   const { executable, logPath } = await createFakeOpencode(cwd);
 
   const runState = await createRun(cwd, "mr-preflight", {
@@ -502,9 +567,59 @@ test("opencode runtime invokes stage and verifier agents for each workflow stage
   assert.equal(mrPrepare.evidence.length, 2);
 });
 
-test("opencode runtime fails a stage when the verifier evidence rejects it", async () => {
+test("opencode runtime accepts opencode.json agent definitions", async () => {
   const cwd = await tempProject();
   await initializeProject(cwd);
+  await writeOpencodeJsonAgents(cwd, workflowRoles());
+  const { executable } = await createFakeOpencode(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+  });
+
+  assert.equal(runState.status, "success");
+  assertAllStagesSuccessful(runState);
+});
+
+test("opencode runtime accepts Markdown agent definitions without parsing unrelated opencode.json", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd, "mr-preflight", { platform: "opencode" });
+  await writeText(cwd, "opencode.json", "{not valid json\n");
+  const { executable } = await createFakeOpencode(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+  });
+
+  assert.equal(runState.status, "success");
+});
+
+test("opencode runtime requires opencode.json agent entries to be objects", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeOpencodeJsonAgents(cwd, workflowRoles());
+  const config = await readJson(cwd, "opencode.json");
+  config.agent.static_check = null;
+  await writeJson(cwd, "opencode.json", config);
+  const { executable } = await createFakeOpencode(cwd);
+
+  await assert.rejects(
+    () =>
+      createRun(cwd, "mr-preflight", {
+        runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+      }),
+    (error) => {
+      assert.match(error.message, /Missing OpenCode agent definitions/);
+      assert.match(error.message, /agent: static_check/);
+      assert.doesNotMatch(error.message, /agent: static_check_verifier/);
+      return true;
+    }
+  );
+});
+
+test("opencode runtime fails a stage when the verifier evidence rejects it", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd, "mr-preflight", { platform: "opencode" });
   const { executable } = await createFakeOpencode(cwd, { rejectVerifierForStage: "static_check" });
 
   await assert.rejects(

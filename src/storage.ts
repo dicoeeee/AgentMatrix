@@ -130,6 +130,7 @@ export async function createRun(
   if (!options.runtimeAdapter) {
     throw new AgentMatrixError("Workflow execution adapter is not configured.");
   }
+  await options.runtimeAdapter.validateProject?.(paths.projectRoot, workflow);
 
   const runId = createRunId();
   const runDir = path.join(paths.runsDir, runId);
@@ -191,6 +192,7 @@ export async function resumeRun(
   if (!options.runtimeAdapter) {
     throw new AgentMatrixError("Workflow execution adapter is not configured.");
   }
+  await options.runtimeAdapter.validateProject?.(paths.projectRoot, workflow);
 
   updateRun(runState, "running");
   runState.events.push({

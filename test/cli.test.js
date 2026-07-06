@@ -588,7 +588,7 @@ test("run executes mr-preflight stages with mock executor and verifier evidence"
 
 test("run can execute through the opencode runtime adapter", async () => {
   const cwd = await tempProject();
-  assert.equal((await runCli(["init"], cwd)).code, 0);
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
   const { executable, logPath } = await createFakeOpencode(cwd);
 
   const run = await runCli(["run", "--runtime", "opencode", "--opencode-bin", executable], cwd);
@@ -622,6 +622,21 @@ test("run can execute through the opencode runtime adapter", async () => {
       "mr_prepare_verifier"
     ]
   );
+});
+
+test("run --runtime opencode validates platform agent definitions before creating a run", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+  const { executable } = await createFakeOpencode(cwd);
+
+  const result = await runCli(["run", "--runtime", "opencode", "--opencode-bin", executable], cwd);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Missing OpenCode agent definitions/);
+  assert.match(result.stderr, /agent: static_check/);
+  assert.match(result.stderr, /\.opencode\/agents\/static_check\.md/);
+  assert.match(result.stderr, /opencode\.json agent\.static_check/);
+  assert.match(result.stderr, /agentmatrix init --platform opencode/);
+  assert.deepEqual(await readdir(path.join(cwd, ".agentmatrix", "runs")), []);
 });
 
 test("run validates edited workflow before creating a run", async () => {

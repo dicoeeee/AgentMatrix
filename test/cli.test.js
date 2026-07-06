@@ -1004,6 +1004,73 @@ test("visualize renders real run state statuses as Mermaid and JSON", async () =
   );
 });
 
+test("visualize renders parallel stage report commands inside the run graph", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+
+  const mermaid = await runCli(["visualize", runId], cwd);
+  assert.equal(mermaid.code, 0, mermaid.stderr);
+  assert.match(mermaid.stdout, /parallel group: code-review-lanes-1/);
+  assert.match(mermaid.stdout, /Correctness Review/);
+  assert.match(mermaid.stdout, /Security Review/);
+  assert.match(mermaid.stdout, /class stage_2_activity_0 parallelActivity;/);
+});
+
+test("visualize renders background subagents from opencode executor evidence", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+  const runState = await readRunState(cwd, runId);
+  const codeReview = runState.stages.find((stage) => stage.id === "code_review");
+  assert.ok(codeReview);
+
+  const taskEvent = (description, backgroundTaskId) =>
+    JSON.stringify({
+      type: "tool_use",
+      part: {
+        type: "tool",
+        tool: "task",
+        state: {
+          status: "completed",
+          input: {
+            description,
+            run_in_background: true
+          },
+          metadata: {
+            subagent: "Sisyphus-Junior",
+            backgroundTaskId,
+            category: "quick"
+          }
+        }
+      }
+    });
+
+  await writeFile(
+    path.join(cwd, codeReview.evidence[0]),
+    JSON.stringify(
+      {
+        schema_version: 1,
+        run_id: runId,
+        stage_id: "code_review",
+        agent_role: "code_review",
+        status: "success",
+        stdout: `${taskEvent("Find changed files for review", "bg_36da9cb8")}\n${taskEvent(
+          "Read prior stage reports",
+          "bg_060e0ba0"
+        )}\n`
+      },
+      null,
+      2
+    ) + "\n"
+  );
+
+  const mermaid = await runCli(["visualize", runId], cwd);
+  assert.equal(mermaid.code, 0, mermaid.stderr);
+  assert.match(mermaid.stdout, /parallel group: opencode-background-subagents/);
+  assert.match(mermaid.stdout, /Find changed files for review/);
+  assert.match(mermaid.stdout, /Sisyphus-Junior/);
+  assert.match(mermaid.stdout, /bg_36da9cb8/);
+});
+
 test("visualize auto-generates browser HTML for interactive Mermaid output", async () => {
   const cwd = await tempProject();
   const runId = await createCompletedRun(cwd);
@@ -1046,6 +1113,8 @@ test("visualize auto-generates browser HTML for interactive Mermaid output", asy
   assert.match(html, /class="mermaid diagram"/);
   assert.match(html, /static_check \(success\)/);
   assert.match(html, /mermaid@11/);
+  assert.match(html, /htmlLabels: true/);
+  assert.match(html, /themeVariables/);
 });
 
 test("visualize --no-open suppresses interactive browser HTML generation", async () => {

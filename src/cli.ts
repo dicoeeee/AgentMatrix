@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -22,8 +22,16 @@ import {
   resumeRun
 } from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
-import { AGENTMATRIX_DIR, type RunState, type StageFailureMetadata } from "./types.js";
-import { mermaidToHtml, runToGraph, runToMermaid, workflowToGraph, workflowToMermaid } from "./visualize.js";
+import { AGENTMATRIX_DIR, type RunState, type RunStageState, type StageFailureMetadata } from "./types.js";
+import {
+  mermaidToHtml,
+  runToGraph,
+  runToMermaid,
+  type RunVisualizationDetails,
+  type StageVisualizationActivity,
+  workflowToGraph,
+  workflowToMermaid
+} from "./visualize.js";
 
 interface CliIo {
   stdout: { write(message: string): void; isTTY?: boolean };
@@ -38,6 +46,7 @@ interface GlobalParseResult {
 type VisualizationFormat = "mermaid" | "json";
 type VisualizationOpenMode = "auto" | "always" | "never";
 type RuntimeKind = "mock" | "opencode";
+type JsonRecord = Record<string, unknown>;
 type VisualizationTarget =
   | {
       kind: "run";
@@ -266,7 +275,8 @@ async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
     return;
   }
 
-  const mermaid = runToMermaid(runState);
+  const details = await readRunVisualizationDetails(projectRoot, runState);
+  const mermaid = runToMermaid(runState, details);
   io.stdout.write(mermaid);
   await maybeOpenVisualizationHtml(projectRoot, io, openMode, {
     title: `AgentMatrix run ${runState.id}`,
@@ -653,6 +663,150 @@ function rejectOptionToken(token: string, command: string) {
 
 function rejectUnexpectedPositional(token: string, command: string) {
   throw new CliUsageError(`Command "${command}" does not accept positional argument "${token}".`);
+}
+
+async function readRunVisualizationDetails(
+  projectRoot: string,
+  runState: RunState
+): Promise<RunVisualizationDetails> {
+  const stages = await Promise.all(
+    runState.stages.map(async (stage) => ({
+      stageId: stage.id,
+      activities: await readStageVisualizationActivities(projectRoot, stage)
+    }))
+  );
+
+  return {
+    stages: stages.filter((stage) => stage.activities.length > 0)
+  };
+}
+
+async function readStageVisualizationActivities(projectRoot: string, stage: RunStageState) {
+  const [reportActivities, evidenceActivities] = await Promise.all([
+    readStageReportActivities(projectRoot, stage),
+    readExecutorEvidenceActivities(projectRoot, stage)
+  ]);
+  const activities = [...reportActivities, ...evidenceActivities];
+
+  if (activities.length <= 10) {
+    return activities;
+  }
+
+  return [
+    ...activities.slice(0, 9),
+    {
+      kind: "command" as const,
+      label: `${activities.length - 9} additional parallel activities`,
+      group: "truncated-activities",
+      status: "hidden"
+    }
+  ];
+}
+
+async function readStageReportActivities(projectRoot: string, stage: RunStageState) {
+  const stageReportPath = stage.artifacts.find((artifact) => artifact.endsWith("stage-report.json"));
+  if (!stageReportPath) {
+    return [];
+  }
+
+  const report = await readProjectJsonIfPresent(projectRoot, stageReportPath);
+  const commands = Array.isArray(report?.commands) ? report.commands.filter(isJsonRecord) : [];
+
+  return commands
+    .filter((command) => typeof command.parallel_group === "string")
+    .map(
+      (command): StageVisualizationActivity => ({
+        kind: "command",
+        label: stringField(command, "name") ?? stringField(command, "command") ?? "Stage command",
+        group: stringField(command, "parallel_group") ?? "parallel-commands",
+        status: stringField(command, "status"),
+        detail: stringField(command, "command")
+      })
+    );
+}
+
+async function readExecutorEvidenceActivities(projectRoot: string, stage: RunStageState) {
+  const evidenceRecords = await Promise.all(
+    stage.evidence.map((evidencePath) => readProjectJsonIfPresent(projectRoot, evidencePath))
+  );
+
+  return evidenceRecords.flatMap((record) => {
+    const stdout = record ? stringField(record, "stdout") : undefined;
+    if (!stdout) {
+      return [];
+    }
+    return backgroundTaskActivities(stdout);
+  });
+}
+
+async function readProjectJsonIfPresent(projectRoot: string, relativePath: string) {
+  try {
+    const content = await readFile(path.resolve(projectRoot, relativePath), "utf8");
+    const parsed: unknown = JSON.parse(content);
+    return isJsonRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function backgroundTaskActivities(stdout: string): StageVisualizationActivity[] {
+  return stdout
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .flatMap((line) => {
+      const event = parseJsonRecord(line);
+      const part = recordField(event, "part");
+      const state = recordField(part, "state");
+      const input = recordField(state, "input");
+      const metadata = recordField(state, "metadata");
+
+      if (
+        stringField(event, "type") !== "tool_use" ||
+        stringField(part, "tool") !== "task" ||
+        input?.run_in_background !== true
+      ) {
+        return [];
+      }
+
+      const backgroundTaskId = stringField(metadata, "backgroundTaskId");
+      const subagent = stringField(metadata, "subagent") ?? stringField(metadata, "agent");
+      const description =
+        stringField(input, "description") ?? stringField(metadata, "description") ?? backgroundTaskId ?? "Background task";
+      const detail = [subagent, backgroundTaskId].filter(Boolean).join(" - ");
+
+      return [
+        {
+          kind: "subagent" as const,
+          label: description,
+          group: "opencode-background-subagents",
+          status: stringField(state, "status"),
+          detail: detail || undefined
+        }
+      ];
+    });
+}
+
+function parseJsonRecord(value: string) {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isJsonRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isJsonRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function recordField(record: JsonRecord | undefined, fieldName: string) {
+  const value = record?.[fieldName];
+  return isJsonRecord(value) ? value : undefined;
+}
+
+function stringField(record: JsonRecord | undefined, fieldName: string) {
+  const value = record?.[fieldName];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 async function maybeOpenVisualizationHtml(

@@ -8,12 +8,32 @@ import type {
 } from "./types.js";
 
 const STATUS_CLASS_DEFS: Record<StageStatus, string> = {
-  pending: "fill:#f8fafc,stroke:#94a3b8,color:#0f172a",
-  running: "fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e",
-  success: "fill:#dcfce7,stroke:#16a34a,color:#14532d",
-  failed: "fill:#fee2e2,stroke:#dc2626,color:#7f1d1d",
-  skipped: "fill:#f3f4f6,stroke:#6b7280,color:#374151"
+  pending: "fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a",
+  running: "fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e",
+  success: "fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d",
+  failed: "fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d",
+  skipped: "fill:#f3f4f6,stroke:#6b7280,stroke-width:2px,color:#374151"
 };
+const ACTIVITY_CLASS_DEFS = {
+  parallelActivity: "fill:#eef2ff,stroke:#4f46e5,stroke-width:1.5px,color:#312e81,stroke-dasharray:4 3"
+};
+
+export interface StageVisualizationActivity {
+  kind: "command" | "subagent";
+  label: string;
+  group: string;
+  status?: string;
+  detail?: string;
+}
+
+export interface StageVisualizationDetails {
+  stageId: string;
+  activities: StageVisualizationActivity[];
+}
+
+export interface RunVisualizationDetails {
+  stages: StageVisualizationDetails[];
+}
 
 export function runToGraph(runState: RunState): RunGraph {
   return {
@@ -40,8 +60,8 @@ export function workflowToGraph(workflow: WorkflowDefinition): WorkflowGraph {
   };
 }
 
-export function runToMermaid(runState: RunState) {
-  return graphToMermaid(runToGraph(runState));
+export function runToMermaid(runState: RunState, details?: RunVisualizationDetails) {
+  return graphToMermaid(runToGraph(runState), details);
 }
 
 export function workflowToMermaid(workflow: WorkflowDefinition) {
@@ -61,65 +81,181 @@ export function mermaidToHtml(title: string, mermaidSource: string) {
   <style>
     :root {
       color: #172033;
-      background: #f6f8fb;
+      background: #eef3f8;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
     body {
       margin: 0;
       min-height: 100vh;
+      background:
+        linear-gradient(180deg, #f8fbfe 0%, #eef3f8 52%, #e9eef5 100%);
     }
 
     header {
-      border-bottom: 1px solid #d8dee8;
-      background: #ffffff;
-      padding: 24px 32px;
+      border-bottom: 1px solid #d6deea;
+      background: rgba(255, 255, 255, 0.88);
+      padding: 22px 32px 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
     }
 
     h1 {
       margin: 0;
-      font-size: 22px;
-      font-weight: 650;
+      font-size: 24px;
+      font-weight: 700;
       letter-spacing: 0;
     }
 
     main {
-      padding: 32px;
+      box-sizing: border-box;
+      min-height: calc(100vh - 92px);
+      padding: 28px;
+    }
+
+    .surface {
+      box-sizing: border-box;
+      min-height: calc(100vh - 148px);
+      overflow: auto;
+      border: 1px solid #cfd8e6;
+      border-radius: 8px;
+      background: #ffffff;
+      box-shadow: 0 18px 50px rgba(42, 56, 82, 0.12);
     }
 
     .diagram {
-      min-height: 320px;
-      overflow: auto;
-      border: 1px solid #d8dee8;
-      border-radius: 8px;
-      background: #ffffff;
-      padding: 24px;
+      min-width: 920px;
+      min-height: 520px;
+      margin: 0;
+      padding: 36px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      padding: 14px 18px;
+      border-bottom: 1px solid #e1e7f0;
+      color: #475467;
+      font-size: 13px;
+      background: #fbfcfe;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .legend i {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #94a3b8;
+    }
+
+    .legend .success { background: #16a34a; }
+    .legend .running { background: #0284c7; }
+    .legend .failed { background: #dc2626; }
+    .legend .parallel { background: #4f46e5; }
+
+    .mermaid svg {
+      display: block;
+      margin: 0 auto;
+      max-width: none;
+    }
+
+    .mermaid .cluster rect {
+      fill: #f8fafc !important;
+      stroke: #d8e0ec !important;
+      rx: 8px !important;
+    }
+
+    .mermaid .edgePath .path {
+      stroke: #7d8aa3 !important;
+      stroke-width: 1.8px !important;
     }
   </style>
 </head>
 <body>
   <header>
+    <p class="eyebrow">AgentMatrix visualization</p>
     <h1>${escapedTitle}</h1>
   </header>
   <main>
-    <pre class="mermaid diagram">${escapedMermaid}</pre>
+    <section class="surface">
+      <div class="legend">
+        <span><i class="success"></i>Success</span>
+        <span><i class="running"></i>Running</span>
+        <span><i class="failed"></i>Failed</span>
+        <span><i class="parallel"></i>Parallel activity</span>
+      </div>
+      <pre class="mermaid diagram">${escapedMermaid}</pre>
+    </section>
   </main>
   <script type="module">
     import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
-    mermaid.initialize({ startOnLoad: true, securityLevel: "strict", theme: "base" });
+    mermaid.initialize({
+      startOnLoad: true,
+      securityLevel: "strict",
+      theme: "base",
+      htmlLabels: true,
+      flowchart: {
+        curve: "basis",
+        nodeSpacing: 46,
+        rankSpacing: 68,
+        useMaxWidth: false
+      },
+      themeVariables: {
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+        primaryBorderColor: "#cfd8e6",
+        lineColor: "#7d8aa3",
+        clusterBkg: "#f8fafc",
+        clusterBorder: "#d8e0ec"
+      }
+    });
   </script>
 </body>
 </html>
 `;
 }
 
-function graphToMermaid(graph: VisualizationGraph) {
+function graphToMermaid(graph: VisualizationGraph, details?: RunVisualizationDetails) {
   const nodeNames = new Map(graph.nodes.map((node, index) => [node.id, `stage_${index}`]));
   const lines = ["graph TD"];
+  const activitiesByStage = new Map(
+    details?.stages.map((stage) => [stage.stageId, stage.activities]) ?? []
+  );
 
-  for (const node of graph.nodes) {
-    const statusLabel = node.status ? ` (${node.status})` : "";
-    lines.push(`  ${nodeNames.get(node.id)}["${escapeMermaidLabel(`${node.id}${statusLabel}`)}"]`);
+  for (const [index, node] of graph.nodes.entries()) {
+    const nodeName = nodeNames.get(node.id);
+    if (!nodeName) {
+      continue;
+    }
+
+    const activities = activitiesByStage.get(node.id) ?? [];
+    if (activities.length === 0) {
+      lines.push(`  ${nodeName}["${escapeMermaidLabel(stageLabel(node.id, node.status))}"]`);
+      continue;
+    }
+
+    lines.push(`  subgraph stage_${index}_group["${escapeMermaidLabel(displayName(node.id))}"]`);
+    lines.push("    direction TB");
+    lines.push(`    ${nodeName}["${escapeMermaidLabel(stageLabel(node.id, node.status))}"]`);
+    for (const [activityIndex, activity] of activities.entries()) {
+      const activityName = `${nodeName}_activity_${activityIndex}`;
+      lines.push(`    ${activityName}["${escapeMermaidLabel(activityLabel(activity))}"]`);
+      lines.push(`    ${nodeName} -.-> ${activityName}`);
+    }
+    lines.push("  end");
   }
 
   for (const edge of graph.edges) {
@@ -136,12 +272,60 @@ function graphToMermaid(graph: VisualizationGraph) {
       lines.push(`  class ${nodeNames.get(node.id)} ${node.status};`);
     }
   }
+  for (const [nodeId, activities] of activitiesByStage.entries()) {
+    const nodeName = nodeNames.get(nodeId);
+    if (!nodeName) {
+      continue;
+    }
+    for (const [activityIndex] of activities.entries()) {
+      lines.push(`  class ${nodeName}_activity_${activityIndex} parallelActivity;`);
+    }
+  }
 
   for (const status of statuses) {
     lines.push(`  classDef ${status} ${STATUS_CLASS_DEFS[status]};`);
   }
+  for (const [className, classDef] of Object.entries(ACTIVITY_CLASS_DEFS)) {
+    lines.push(`  classDef ${className} ${classDef};`);
+  }
 
   return `${lines.join("\n")}\n`;
+}
+
+function stageLabel(id: string, status?: StageStatus) {
+  const statusLabel = status ? `${id} (${status})` : id;
+  return `${escapeHtml(displayName(id))}<br/><small>${escapeHtml(statusLabel)}</small>`;
+}
+
+function activityLabel(activity: StageVisualizationActivity) {
+  const lines = [
+    activity.label,
+    `parallel group: ${activity.group}`,
+    activity.detail,
+    activity.status ? `status: ${activity.status}` : undefined
+  ].filter((line): line is string => Boolean(line));
+
+  return lines.map((line) => escapeHtml(truncateLabel(line))).join("<br/>");
+}
+
+function displayName(id: string) {
+  const acronyms: Record<string, string> = {
+    api: "API",
+    json: "JSON",
+    mr: "MR",
+    pr: "PR",
+    ui: "UI"
+  };
+
+  return id
+    .split(/[_-]+/u)
+    .filter(Boolean)
+    .map((part) => acronyms[part.toLowerCase()] ?? `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+}
+
+function truncateLabel(value: string) {
+  return value.length > 84 ? `${value.slice(0, 81)}...` : value;
 }
 
 function escapeMermaidLabel(label: string) {

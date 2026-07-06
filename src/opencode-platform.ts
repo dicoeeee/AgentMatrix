@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { WorkflowDefinition, WorkflowStage } from "./types.js";
+import { workflowSkillTemplateRelativePath } from "./workflow-resource-templates.js";
 
 export type PlatformKind = "opencode";
 
@@ -111,7 +112,7 @@ function executorInstructions(stage: WorkflowStage) {
   return [
     "Write every required stage output declared in the context before finishing.",
     "The `stage_report` output must be valid JSON matching AgentMatrix's stage_report schema.",
-    `Stage skills exposed by the workflow: ${formatInlineList(stage.skills)}.`,
+    `Stage skills exposed by the workflow: ${formatSkillList(stage.skills)}.`,
     `Stage MCP resources exposed by the workflow: ${formatInlineList(stage.mcpResources)}.`
   ];
 }
@@ -127,6 +128,14 @@ function verifierInstructions(stage: WorkflowStage) {
 
 function formatInlineList(values: string[]) {
   return values.length === 0 ? "none" : values.map((value) => `\`${value}\``).join(", ");
+}
+
+function formatSkillList(skills: string[]) {
+  if (skills.length === 0) {
+    return "none";
+  }
+
+  return skills.map((skill) => `\`${skill}\` at \`${workflowSkillTemplateRelativePath(skill)}\``).join(", ");
 }
 
 function hasErrorCode(error: unknown, code: string): error is NodeJS.ErrnoException {

@@ -5,7 +5,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
 import { createMockRuntimeAdapter } from "./mock-runtime.js";
-import { createOpencodeRuntimeAdapter, type OpencodeRuntimeOptions } from "./opencode-runtime.js";
+import {
+  createOpencodeRuntimeAdapter,
+  type OpencodeCommandEvent,
+  type OpencodeRuntimeOptions
+} from "./opencode-runtime.js";
 import type { PlatformKind } from "./opencode-platform.js";
 import {
   createRun,
@@ -81,10 +85,11 @@ Options:
 Start a fresh workflow run and write project-local filesystem state.
 
 Usage:
-  agentmatrix [--project <dir>] run [workflow] [--runtime mock|opencode]
+  agentmatrix [--project <dir>] run [workflow] [--runtime mock|opencode] [--verbose]
 
 Runtime options:
   --runtime <runtime>       Runtime adapter to use: mock or opencode
+  --verbose                 Print runtime command details
   --opencode-bin <path>     OpenCode executable path when using --runtime opencode
   --opencode-model <model>  OpenCode model in provider/model form
   --opencode-attach <url>   Attach to a running opencode serve instance
@@ -95,10 +100,11 @@ Runtime options:
 Continue an existing run by id, or the latest resumable run when no id is provided.
 
 Usage:
-  agentmatrix [--project <dir>] resume [run-id] [--runtime mock|opencode]
+  agentmatrix [--project <dir>] resume [run-id] [--runtime mock|opencode] [--verbose]
 
 Runtime options:
   --runtime <runtime>       Runtime adapter to use: mock or opencode
+  --verbose                 Print runtime command details
   --opencode-bin <path>     OpenCode executable path when using --runtime opencode
   --opencode-model <model>  OpenCode model in provider/model form
   --opencode-attach <url>   Attach to a running opencode serve instance
@@ -177,6 +183,12 @@ async function handleInit(projectRoot: string, args: string[], io: CliIo) {
   const action = result.workflowCreated ? "created" : "already present";
   io.stdout.write(`Initialized AgentMatrix in ${result.projectRoot}\n`);
   io.stdout.write(`Workflow ${action}: ${path.relative(result.projectRoot, result.workflowPath)}\n`);
+  io.stdout.write(
+    `Skill templates: created ${result.skillTemplates.created.length}, skipped ${result.skillTemplates.skipped.length}\n`
+  );
+  if (result.skillTemplates.unavailable.length > 0) {
+    io.stdout.write(`Skill templates unavailable: ${result.skillTemplates.unavailable.join(", ")}\n`);
+  }
   if (result.platformTemplates) {
     io.stdout.write(
       `OpenCode agent templates: created ${result.platformTemplates.created.length}, skipped ${result.platformTemplates.skipped.length}\n`
@@ -185,7 +197,7 @@ async function handleInit(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleRun(projectRoot: string, args: string[], io: CliIo) {
-  const { positional: workflowId, runtimeAdapter } = parseExecutionArgs(args, "run", "workflow");
+  const { positional: workflowId, runtimeAdapter } = parseExecutionArgs(args, "run", "workflow", io);
   const runState = await createRun(projectRoot, workflowId, { runtimeAdapter });
   io.stdout.write(`Created run ${runState.id} for workflow ${runState.workflowId}\n`);
   io.stdout.write(`State: ${AGENTMATRIX_DIR}/runs/${runState.id}/run.json\n`);
@@ -195,7 +207,7 @@ async function handleRun(projectRoot: string, args: string[], io: CliIo) {
 }
 
 async function handleResume(projectRoot: string, args: string[], io: CliIo) {
-  const { positional: runId, runtimeAdapter } = parseExecutionArgs(args, "resume", "run-id");
+  const { positional: runId, runtimeAdapter } = parseExecutionArgs(args, "resume", "run-id", io);
   const runState = await resumeRun(projectRoot, runId, { runtimeAdapter });
   io.stdout.write(`Resumed run ${runState.id}\n`);
   if (runState.status === "success") {
@@ -358,11 +370,12 @@ function parseOptionalPositional(args: string[], command: string, name: string) 
   return args[0];
 }
 
-function parseExecutionArgs(args: string[], command: string, name: string) {
+function parseExecutionArgs(args: string[], command: string, name: string, io: CliIo) {
   let runtime: RuntimeKind = "mock";
   const opencodeOptions: OpencodeRuntimeOptions = {};
   const positionals: string[] = [];
   let sawOpencodeOption = false;
+  let verbose = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
@@ -427,6 +440,11 @@ function parseExecutionArgs(args: string[], command: string, name: string) {
       continue;
     }
 
+    if (token === "--verbose") {
+      verbose = true;
+      continue;
+    }
+
     rejectOptionToken(token, command);
     positionals.push(token);
   }
@@ -439,11 +457,33 @@ function parseExecutionArgs(args: string[], command: string, name: string) {
     throw new CliUsageError("OpenCode options require --runtime opencode.");
   }
 
+  if (verbose) {
+    opencodeOptions.onCommandResult = (event) => {
+      io.stdout.write(formatOpencodeVerboseEvent(event));
+    };
+  }
+
   return {
     positional: positionals[0],
     runtimeAdapter:
       runtime === "opencode" ? createOpencodeRuntimeAdapter(opencodeOptions) : createMockRuntimeAdapter()
   };
+}
+
+function formatOpencodeVerboseEvent(event: OpencodeCommandEvent) {
+  const lines = [
+    `[opencode:${event.kind}] stage=${event.stageId} agent=${event.agentRole} exit=${event.exitCode}`,
+    `command: ${event.command}`
+  ];
+
+  if (event.stdout.trim().length > 0) {
+    lines.push("stdout:", trimTrailingWhitespace(event.stdout));
+  }
+  if (event.stderr.trim().length > 0) {
+    lines.push("stderr:", trimTrailingWhitespace(event.stderr));
+  }
+
+  return `${lines.join("\n")}\n`;
 }
 
 function parseStatusArgs(args: string[]) {
@@ -558,6 +598,10 @@ function readInlineOptionValue(token: string, optionName: string) {
     throw new CliUsageError(`Missing value for ${optionName}.`);
   }
   return value;
+}
+
+function trimTrailingWhitespace(value: string) {
+  return value.replace(/\s+$/u, "");
 }
 
 function rejectUnknownOptions(args: string[], command: string) {

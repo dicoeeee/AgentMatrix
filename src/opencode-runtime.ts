@@ -18,6 +18,7 @@ export interface OpencodeRuntimeOptions {
   attach?: string;
   autoApprove?: boolean;
   timeoutMs?: number;
+  onCommandResult?: (event: OpencodeCommandEvent) => void;
 }
 
 interface OpencodeCommandResult {
@@ -25,6 +26,12 @@ interface OpencodeCommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+export interface OpencodeCommandEvent extends OpencodeCommandResult {
+  kind: "executor" | "verifier";
+  stageId: string;
+  agentRole: string;
 }
 
 interface VerifierEvidence {
@@ -56,6 +63,12 @@ export function createOpencodeRuntimeAdapter(options: OpencodeRuntimeOptions = {
         attach: options.attach,
         autoApprove: options.autoApprove,
         timeoutMs
+      });
+      options.onCommandResult?.({
+        kind: "executor",
+        stageId: context.stage.id,
+        agentRole: context.stage.agentRole,
+        ...result
       });
 
       if (result.exitCode !== 0 || !(await pathExists(context.projectRoot, context.stageReportPath))) {
@@ -95,6 +108,12 @@ export function createOpencodeRuntimeAdapter(options: OpencodeRuntimeOptions = {
         attach: options.attach,
         autoApprove: options.autoApprove,
         timeoutMs
+      });
+      options.onCommandResult?.({
+        kind: "verifier",
+        stageId: context.stage.id,
+        agentRole: context.stage.verifierRole,
+        ...result
       });
       const evidence = await readVerifierEvidence(context, result);
 

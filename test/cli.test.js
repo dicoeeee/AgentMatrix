@@ -66,6 +66,8 @@ if (!match) {
 
 const context = JSON.parse(match[1]);
 await appendFile(${JSON.stringify(logPath)}, JSON.stringify({ agent, kind: context.kind, stage_id: context.stage.id }) + "\\n");
+console.log(\`fake opencode stdout \${context.kind} \${context.stage.id}\`);
+console.error(\`fake opencode stderr \${context.kind} \${context.stage.id}\`);
 
 async function writeJson(relativePath, data) {
   const filePath = path.join(dir, relativePath);
@@ -274,6 +276,38 @@ test("init can choose the built-in mr-preflight workflow template", async () => 
   assert.match(unsupported.stderr, /Unknown workflow template/);
 });
 
+test("init pre-seeds bundled skill templates declared by mr-preflight", async () => {
+  const cwd = await tempProject();
+  const result = await runCli(["init"], cwd);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /Skill templates: created 2, skipped 0/);
+
+  const skillsDir = path.join(cwd, ".agentmatrix", "skills");
+  assert.deepEqual((await readdir(skillsDir)).sort(), ["industry-code-review", "static-check"]);
+
+  const staticCheck = await readFile(path.join(skillsDir, "static-check", "SKILL.md"), "utf8");
+  assert.match(staticCheck, /name: static-check/);
+  assert.equal(await exists(path.join(skillsDir, "static-check", "references", "typescript.md")), true);
+
+  const codeReview = await readFile(path.join(skillsDir, "industry-code-review", "SKILL.md"), "utf8");
+  assert.match(codeReview, /name: industry-code-review/);
+  assert.equal(await exists(path.join(skillsDir, "industry-code-review", "references", "dynamic-routing.md")), true);
+});
+
+test("init preserves existing pre-seeded skill templates", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const skillPath = path.join(cwd, ".agentmatrix", "skills", "static-check", "SKILL.md");
+  await writeFile(skillPath, "custom static check skill\n");
+
+  const second = await runCli(["init"], cwd);
+  assert.equal(second.code, 0, second.stderr);
+  assert.match(second.stdout, /Skill templates: created 0, skipped 2/);
+  assert.equal(await readFile(skillPath, "utf8"), "custom static check skill\n");
+});
+
 test("init --platform opencode creates OpenCode templates for every mr-preflight role", async () => {
   const cwd = await tempProject();
   const result = await runCli(["init", "--platform", "opencode"], cwd);
@@ -299,6 +333,7 @@ test("init --platform opencode creates OpenCode templates for every mr-preflight
   assert.match(staticCheck, /tools:/);
   assert.match(staticCheck, /write: true/);
   assert.match(staticCheck, /AGENTMATRIX_CONTEXT_JSON/);
+  assert.match(staticCheck, /\.agentmatrix\/skills\/static-check\/SKILL\.md/);
   assert.doesNotMatch(staticCheck, /No static check gates were discovered/);
 
   const verifier = await readFile(path.join(agentsDir, "static_check_verifier.md"), "utf8");
@@ -622,6 +657,29 @@ test("run can execute through the opencode runtime adapter", async () => {
       "mr_prepare_verifier"
     ]
   );
+});
+
+test("run --runtime opencode --verbose prints opencode command details", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const { executable } = await createFakeOpencode(cwd);
+
+  const normal = await runCli(["run", "--runtime", "opencode", "--opencode-bin", executable], cwd);
+  assert.equal(normal.code, 0, normal.stderr);
+  assert.doesNotMatch(normal.stdout, /fake opencode stdout/);
+  assert.doesNotMatch(normal.stdout, /fake opencode stderr/);
+
+  const verbose = await runCli(
+    ["run", "--runtime", "opencode", "--opencode-bin", executable, "--verbose"],
+    cwd
+  );
+  assert.equal(verbose.code, 0, verbose.stderr);
+  assert.match(verbose.stdout, /\[opencode:executor\] stage=static_check agent=static_check exit=0/);
+  assert.match(verbose.stdout, /\[opencode:verifier\] stage=static_check agent=static_check_verifier exit=0/);
+  assert.match(verbose.stdout, /command: .*fake-opencode\.js run .* --agent static_check .* <prompt>/);
+  assert.match(verbose.stdout, /stdout:\nfake opencode stdout stage_execution static_check/);
+  assert.match(verbose.stdout, /stderr:\nfake opencode stderr stage_verification static_check/);
+  assert.match(verbose.stdout, /Completed run/);
 });
 
 test("run --runtime opencode validates platform agent definitions before creating a run", async () => {

@@ -28,6 +28,10 @@ _Avoid_: Resource, runtime adapter
 A project-local declaration that a logical workflow dependency is available to AgentMatrix before a run starts.
 _Avoid_: OpenCode agent definition, installed file
 
+**Bundled Skill Template**:
+A portable skill instruction directory shipped with AgentMatrix and copied into a project during initialization when the selected workflow declares that skill.
+_Avoid_: Available resource, platform agent template
+
 **Opt-In Integration Test**:
 A test that exercises an external agent platform or service only when explicitly enabled by the developer.
 _Avoid_: Unit test, default CI test

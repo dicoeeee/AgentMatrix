@@ -34,6 +34,10 @@ import {
   type WorkflowRuntimeAdapter
 } from "./types.js";
 import {
+  installWorkflowSkillTemplates,
+  type SkillTemplateInstallResult
+} from "./workflow-resource-templates.js";
+import {
   failedCommand,
   firstBlocker,
   hasSkipReason,
@@ -51,6 +55,7 @@ export interface InitResult {
   projectRoot: string;
   workflowPath: string;
   workflowCreated: boolean;
+  skillTemplates: SkillTemplateInstallResult;
   platformTemplates?: PlatformTemplateInstallResult;
 }
 
@@ -100,6 +105,7 @@ export async function initializeProject(
 
   const workflowCreated = await writeFileIfAbsent(paths.defaultWorkflowPath, DEFAULT_WORKFLOW_YAML);
   const initializedWorkflow = parseWorkflow(await readFile(paths.defaultWorkflowPath, "utf8"), paths.defaultWorkflowPath);
+  const skillTemplates = await installWorkflowSkillTemplates(paths.projectRoot, initializedWorkflow);
   const platformTemplates =
     options.platform === "opencode"
       ? await installOpencodeAgentTemplates(paths.projectRoot, initializedWorkflow, {
@@ -115,6 +121,7 @@ export async function initializeProject(
     projectRoot: paths.projectRoot,
     workflowPath: paths.defaultWorkflowPath,
     workflowCreated,
+    skillTemplates,
     ...(platformTemplates ? { platformTemplates } : {})
   };
 }
@@ -262,6 +269,7 @@ export function projectPaths(projectRoot: string) {
     agentDir,
     configPath: path.join(agentDir, CONFIG_FILE),
     workflowsDir: path.join(agentDir, "workflows"),
+    skillsDir: path.join(agentDir, "skills"),
     defaultWorkflowPath: path.join(agentDir, "workflows", DEFAULT_WORKFLOW_FILE),
     runsDir: path.join(agentDir, "runs"),
     artifactsDir: path.join(agentDir, "artifacts")

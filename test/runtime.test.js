@@ -495,11 +495,12 @@ test("opencode runtime rejects missing platform agent definitions before creatin
       }),
     (error) => {
       assert.match(error.message, /Missing OpenCode agent definitions/);
-      for (const role of workflowRoles()) {
+      for (const role of workflowRoles().filter((candidate) => candidate !== "static_check")) {
         assert.match(error.message, new RegExp(`agent: ${role}`));
       }
-      assert.match(error.message, /\.opencode\/agents\/static_check\.md/);
-      assert.match(error.message, /opencode\.json agent\.static_check/);
+      assert.doesNotMatch(error.message, /agent: static_check\n/);
+      assert.match(error.message, /\.opencode\/agents\/static_check_verifier\.md/);
+      assert.match(error.message, /opencode\.json agent\.static_check_verifier/);
       assert.match(error.message, /agentmatrix init --platform opencode/);
       return true;
     }
@@ -529,7 +530,7 @@ test("opencode runtime rejects missing platform agent definitions before mutatin
   );
 });
 
-test("opencode runtime invokes stage and verifier agents for each workflow stage", async () => {
+test("opencode runtime invokes platform agents for stage execution and verification", async () => {
   const cwd = await tempProject();
   await initializeProject(cwd, "mr-preflight", { platform: "opencode" });
   const { executable, logPath } = await createFakeOpencode(cwd);
@@ -545,7 +546,6 @@ test("opencode runtime invokes stage and verifier agents for each workflow stage
   assert.deepEqual(
     calls.map((call) => [call.agent, call.kind, call.stage_id]),
     [
-      ["static_check", "stage_execution", "static_check"],
       ["static_check_verifier", "stage_verification", "static_check"],
       ["test_check", "stage_execution", "test_check"],
       ["test_check_verifier", "stage_verification", "test_check"],
@@ -557,6 +557,7 @@ test("opencode runtime invokes stage and verifier agents for each workflow stage
   );
   assert.ok(calls.every((call) => call.dir === cwd));
   assert.ok(calls.every((call) => call.format === "json"));
+  assert.equal(calls.some((call) => call.agent === "static_check" && call.kind === "stage_execution"), false);
 
   const mrPrepare = runState.stages.find((stage) => stage.id === "mr_prepare");
   assert.ok(mrPrepare);
@@ -599,7 +600,7 @@ test("opencode runtime requires opencode.json agent entries to be objects", asyn
   await initializeProject(cwd);
   await writeOpencodeJsonAgents(cwd, workflowRoles());
   const config = await readJson(cwd, "opencode.json");
-  config.agent.static_check = null;
+  config.agent.static_check_verifier = null;
   await writeJson(cwd, "opencode.json", config);
   const { executable } = await createFakeOpencode(cwd);
 
@@ -610,10 +611,63 @@ test("opencode runtime requires opencode.json agent entries to be objects", asyn
       }),
     (error) => {
       assert.match(error.message, /Missing OpenCode agent definitions/);
-      assert.match(error.message, /agent: static_check/);
-      assert.doesNotMatch(error.message, /agent: static_check_verifier/);
+      assert.match(error.message, /agent: static_check_verifier/);
+      assert.doesNotMatch(error.message, /agent: static_check\n/);
       return true;
     }
+  );
+});
+
+test("opencode runtime uses AgentMatrix static_check scheduling before platform verification", async () => {
+  const cwd = await tempProject();
+  await initializeProject(cwd);
+  await writeOpencodeJsonAgents(cwd, workflowRoles().filter((role) => role !== "static_check"));
+  await writeText(
+    cwd,
+    "package.json",
+    JSON.stringify(
+      {
+        scripts: {
+          lint: "node scripts/pass.js lint",
+          typecheck: "node scripts/pass.js typecheck"
+        }
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  await writeText(
+    cwd,
+    "scripts/pass.js",
+    "console.log(process.argv[2] + ' ok');\n"
+  );
+  const { executable, logPath } = await createFakeOpencode(cwd);
+
+  const runState = await createRun(cwd, "mr-preflight", {
+    runtimeAdapter: createOpencodeRuntimeAdapter({ executable })
+  });
+
+  assert.equal(runState.status, "success");
+  assertAllStagesSuccessful(runState);
+
+  const calls = await readJsonLines(logPath);
+  assert.equal(calls.some((call) => call.agent === "static_check" && call.kind === "stage_execution"), false);
+  assert.deepEqual(calls[0], {
+    args: calls[0].args,
+    agent: "static_check_verifier",
+    dir: cwd,
+    format: "json",
+    kind: "stage_verification",
+    stage_id: "static_check"
+  });
+
+  const staticReport = await readJson(cwd, path.join(runState.artifactPath, "static_check", "stage-report.json"));
+  assert.deepEqual(
+    staticReport.commands.map((command) => [command.name, command.status, command.parallel_group]),
+    [
+      ["Lint", "success", "read-only-1"],
+      ["Typecheck", "success", "read-only-1"]
+    ]
   );
 });
 

@@ -13,7 +13,6 @@ const cliPath = path.join(repoRoot, "dist", "cli.js");
 const enabled = process.env.AGENTMATRIX_OPENCODE_INTEGRATION === "1";
 
 const WORKFLOW_ROLES = [
-  "static_check",
   "static_check_verifier",
   "test_check",
   "test_check_verifier",

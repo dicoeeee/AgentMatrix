@@ -309,12 +309,12 @@ test("init preserves existing pre-seeded skill templates", async () => {
   assert.equal(await readFile(skillPath, "utf8"), "custom static check skill\n");
 });
 
-test("init --platform opencode creates OpenCode templates for every mr-preflight role", async () => {
+test("init --platform opencode creates templates for platform-managed mr-preflight roles", async () => {
   const cwd = await tempProject();
   const result = await runCli(["init", "--platform", "opencode"], cwd);
 
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /OpenCode agent templates: created 8, skipped 0/);
+  assert.match(result.stdout, /OpenCode agent templates: created 7, skipped 0/);
 
   const agentsDir = path.join(cwd, ".opencode", "agents");
   const entries = (await readdir(agentsDir)).sort();
@@ -323,31 +323,32 @@ test("init --platform opencode creates OpenCode templates for every mr-preflight
     "code_review_verifier.md",
     "mr_prepare.md",
     "mr_prepare_verifier.md",
-    "static_check.md",
     "static_check_verifier.md",
     "test_check.md",
     "test_check_verifier.md"
   ]);
 
-  const staticCheck = await readFile(path.join(agentsDir, "static_check.md"), "utf8");
-  assert.match(staticCheck, /description: "AgentMatrix executor for static_check"/);
-  assert.match(staticCheck, /tools:/);
-  assert.match(staticCheck, /write: true/);
-  assert.match(staticCheck, /AGENTMATRIX_CONTEXT_JSON/);
-  assert.match(staticCheck, /\.agentmatrix\/skills\/static-check\/SKILL\.md/);
-  assert.doesNotMatch(staticCheck, /No static check gates were discovered/);
+  const testCheck = await readFile(path.join(agentsDir, "test_check.md"), "utf8");
+  assert.match(testCheck, /description: "AgentMatrix executor for test_check"/);
+  assert.match(testCheck, /tools:/);
+  assert.match(testCheck, /write: true/);
+  assert.match(testCheck, /AGENTMATRIX_CONTEXT_JSON/);
+
+  const codeReview = await readFile(path.join(agentsDir, "code_review.md"), "utf8");
+  assert.match(codeReview, /\.agentmatrix\/skills\/industry-code-review\/SKILL\.md/);
 
   const verifier = await readFile(path.join(agentsDir, "static_check_verifier.md"), "utf8");
   assert.match(verifier, /description: "AgentMatrix verifier for static_check"/);
   assert.match(verifier, /write: true/);
   assert.match(verifier, /bash: false/);
   assert.match(verifier, /Write only the verifier evidence JSON/);
+  assert.match(verifier, /AgentMatrix built-in scheduler for `static_check`/);
 });
 
 test("init --platform opencode is idempotent and reports skipped templates", async () => {
   const cwd = await tempProject();
   const first = await runCli(["init", "--platform", "opencode"], cwd);
-  const templatePath = path.join(cwd, ".opencode", "agents", "static_check.md");
+  const templatePath = path.join(cwd, ".opencode", "agents", "static_check_verifier.md");
   const firstTemplate = await readFile(templatePath, "utf8");
 
   const second = await runCli(["init", "--platform", "opencode"], cwd);
@@ -355,7 +356,7 @@ test("init --platform opencode is idempotent and reports skipped templates", asy
 
   assert.equal(first.code, 0, first.stderr);
   assert.equal(second.code, 0, second.stderr);
-  assert.match(second.stdout, /OpenCode agent templates: created 0, skipped 8/);
+  assert.match(second.stdout, /OpenCode agent templates: created 0, skipped 7/);
   assert.equal(secondTemplate, firstTemplate);
 });
 
@@ -363,25 +364,25 @@ test("init --platform opencode preserves existing templates unless force is pass
   const cwd = await tempProject();
   assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
 
-  const templatePath = path.join(cwd, ".opencode", "agents", "static_check.md");
+  const templatePath = path.join(cwd, ".opencode", "agents", "test_check.md");
   const configPath = path.join(cwd, ".agentmatrix", "config.json");
   const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
   const initialConfig = await readFile(configPath, "utf8");
   const editedWorkflow = `${await readFile(workflowPath, "utf8")}\n# user comment\n`;
-  await writeFile(templatePath, "custom static_check template\n");
+  await writeFile(templatePath, "custom test_check template\n");
   await writeFile(workflowPath, editedWorkflow);
 
   const preserved = await runCli(["init", "--platform", "opencode"], cwd);
   assert.equal(preserved.code, 0, preserved.stderr);
-  assert.match(preserved.stdout, /OpenCode agent templates: created 0, skipped 8/);
-  assert.equal(await readFile(templatePath, "utf8"), "custom static_check template\n");
+  assert.match(preserved.stdout, /OpenCode agent templates: created 0, skipped 7/);
+  assert.equal(await readFile(templatePath, "utf8"), "custom test_check template\n");
   assert.equal(await readFile(configPath, "utf8"), initialConfig);
   assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
 
   const forced = await runCli(["init", "--platform", "opencode", "--force"], cwd);
   assert.equal(forced.code, 0, forced.stderr);
-  assert.match(forced.stdout, /OpenCode agent templates: created 8, skipped 0/);
-  assert.match(await readFile(templatePath, "utf8"), /AgentMatrix executor for static_check/);
+  assert.match(forced.stdout, /OpenCode agent templates: created 7, skipped 0/);
+  assert.match(await readFile(templatePath, "utf8"), /AgentMatrix executor for test_check/);
   assert.equal(await readFile(configPath, "utf8"), initialConfig);
   assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
 });
@@ -465,7 +466,7 @@ test("init copies an editable mr-preflight workflow with complete stage contract
   assert.ok(skillNames.includes("industry-code-review"));
 
   const config = JSON.parse(await readFile(path.join(cwd, ".agentmatrix", "config.json"), "utf8"));
-  assert.ok(config.availableResources.agents.includes("static_check"));
+  assert.equal(config.availableResources.agents.includes("static_check"), false);
   assert.ok(config.availableResources.agents.includes("static_check_verifier"));
   assert.ok(config.availableResources.skills.includes("static-check"));
   assert.deepEqual(config.availableResources.mcpResources, []);
@@ -648,7 +649,6 @@ test("run can execute through the opencode runtime adapter", async () => {
   assert.deepEqual(
     calls.map((call) => call.agent),
     [
-      "static_check",
       "static_check_verifier",
       "test_check",
       "test_check_verifier",
@@ -658,6 +658,7 @@ test("run can execute through the opencode runtime adapter", async () => {
       "mr_prepare_verifier"
     ]
   );
+  assert.equal(calls.some((call) => call.agent === "static_check" && call.kind === "stage_execution"), false);
 });
 
 test("run --runtime opencode --verbose prints opencode command details", async () => {
@@ -675,10 +676,8 @@ test("run --runtime opencode --verbose prints opencode command details", async (
     cwd
   );
   assert.equal(verbose.code, 0, verbose.stderr);
-  assert.match(verbose.stdout, /\[opencode:executor\] stage=static_check agent=static_check exit=0/);
+  assert.doesNotMatch(verbose.stdout, /\[opencode:executor\] stage=static_check agent=static_check/);
   assert.match(verbose.stdout, /\[opencode:verifier\] stage=static_check agent=static_check_verifier exit=0/);
-  assert.match(verbose.stdout, /command: .*fake-opencode\.js run .* --agent static_check .* <prompt>/);
-  assert.match(verbose.stdout, /stdout:\nfake opencode stdout stage_execution static_check/);
   assert.match(verbose.stdout, /stderr:\nfake opencode stderr stage_verification static_check/);
   assert.match(verbose.stdout, /Completed run/);
 });
@@ -691,9 +690,10 @@ test("run --runtime opencode validates platform agent definitions before creatin
   const result = await runCli(["run", "--runtime", "opencode", "--opencode-bin", executable], cwd);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Missing OpenCode agent definitions/);
-  assert.match(result.stderr, /agent: static_check/);
-  assert.match(result.stderr, /\.opencode\/agents\/static_check\.md/);
-  assert.match(result.stderr, /opencode\.json agent\.static_check/);
+  assert.match(result.stderr, /agent: static_check_verifier/);
+  assert.doesNotMatch(result.stderr, /agent: static_check\n/);
+  assert.match(result.stderr, /\.opencode\/agents\/static_check_verifier\.md/);
+  assert.match(result.stderr, /opencode\.json agent\.static_check_verifier/);
   assert.match(result.stderr, /agentmatrix init --platform opencode/);
   assert.deepEqual(await readdir(path.join(cwd, ".agentmatrix", "runs")), []);
 });
@@ -768,7 +768,8 @@ test("run checks required resources before creating a run", async () => {
   const result = await runCli(["run"], cwd);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /Missing required resources/);
-  assert.match(result.stderr, /agent: static_check/);
+  assert.match(result.stderr, /agent: static_check_verifier/);
+  assert.doesNotMatch(result.stderr, /agent: static_check\n/);
   assert.match(result.stderr, /skill: static-check/);
   assert.match(result.stderr, /mcp_resource: github/);
   assert.match(result.stderr, /installer/);

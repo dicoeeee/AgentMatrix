@@ -2,8 +2,10 @@ import { execFile, type ExecFileException } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 
+import { usesAgentMatrixStaticCheckExecutor } from "./builtin-stage-executors.js";
 import { writeProjectJson } from "./project-files.js";
 import { assertOpencodeAgentDefinitionsAvailable } from "./opencode-agent-definitions.js";
+import { executeStaticCheckStage } from "./static-check.js";
 import type { StageReport } from "./stage-report.js";
 import type {
   StageExecutionContext,
@@ -52,6 +54,10 @@ export function createOpencodeRuntimeAdapter(options: OpencodeRuntimeOptions = {
     },
 
     async executeStage(context) {
+      if (usesAgentMatrixStaticCheckExecutor(context.runState.workflowId, context.stage.id)) {
+        return executeStaticCheckStage(context);
+      }
+
       const prompt = stageExecutionPrompt(context);
       const result = await runOpencode({
         executable,

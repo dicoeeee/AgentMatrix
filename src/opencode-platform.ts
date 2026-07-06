@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { usesAgentMatrixStaticCheckExecutor } from "./builtin-stage-executors.js";
 import type { WorkflowDefinition, WorkflowStage } from "./types.js";
 import { workflowSkillTemplateRelativePath } from "./workflow-resource-templates.js";
 
@@ -21,6 +22,7 @@ interface AgentTemplateSpec {
   role: string;
   kind: AgentTemplateKind;
   stage: WorkflowStage;
+  executorManagedByAgentMatrix?: boolean;
 }
 
 export async function installOpencodeAgentTemplates(
@@ -59,15 +61,20 @@ export async function installOpencodeAgentTemplates(
 
 function opencodeAgentTemplateSpecs(workflow: WorkflowDefinition): AgentTemplateSpec[] {
   return workflow.stages.flatMap((stage) => [
-    {
-      role: stage.agentRole,
-      kind: "executor" as const,
-      stage
-    },
+    ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)
+      ? []
+      : [
+          {
+            role: stage.agentRole,
+            kind: "executor" as const,
+            stage
+          }
+        ]),
     {
       role: stage.verifierRole,
       kind: "verifier" as const,
-      stage
+      stage,
+      executorManagedByAgentMatrix: usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)
     }
   ]);
 }
@@ -100,7 +107,7 @@ function opencodeAgentTemplate(spec: AgentTemplateSpec) {
     "",
     ...(spec.kind === "executor"
       ? executorInstructions(spec.stage)
-      : verifierInstructions(spec.stage)),
+      : verifierInstructions(spec)),
     "",
     "Do not create or submit an MR/PR, push branches, assign reviewers, change labels, or watch CI.",
     "If blocked, write the required AgentMatrix evidence/output contract instead of only explaining the blocker.",
@@ -117,12 +124,16 @@ function executorInstructions(stage: WorkflowStage) {
   ];
 }
 
-function verifierInstructions(stage: WorkflowStage) {
+function verifierInstructions(spec: AgentTemplateSpec) {
+  const executorLine = spec.executorManagedByAgentMatrix
+    ? `Executor under review: AgentMatrix built-in scheduler for \`${spec.stage.id}\`.`
+    : `Executor role under review: \`${spec.stage.agentRole}\`.`;
+
   return [
     "Verify the declared stage report, outputs, and completion criteria.",
     "Write only the verifier evidence JSON at the path declared in the context.",
     "Set `accepted` to true only when the stage evidence satisfies the declared criteria.",
-    `Executor role under review: \`${stage.agentRole}\`.`
+    executorLine
   ];
 }
 

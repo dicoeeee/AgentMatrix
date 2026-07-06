@@ -1,3 +1,4 @@
+import { usesAgentMatrixStaticCheckExecutor } from "./builtin-stage-executors.js";
 import { AgentMatrixError } from "./errors.js";
 import type { WorkflowDefinition } from "./types.js";
 
@@ -38,7 +39,10 @@ export async function assertWorkflowResourcesAvailable(
 export function availableResourcesFromWorkflow(workflow: WorkflowDefinition): AvailableResources {
   return {
     agents: unique(
-      workflow.stages.flatMap((stage) => [stage.agentRole, stage.verifierRole])
+      workflow.stages.flatMap((stage) => [
+        ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id) ? [] : [stage.agentRole]),
+        stage.verifierRole
+      ])
     ),
     skills: unique(workflow.stages.flatMap((stage) => stage.skills)),
     mcpResources: unique(workflow.stages.flatMap((stage) => stage.mcpResources))
@@ -86,7 +90,9 @@ function requiredResourcesForWorkflow(workflow: WorkflowDefinition): RequiredRes
   const resources: RequiredResource[] = [];
 
   for (const stage of workflow.stages) {
-    resources.push({ kind: "agent", id: stage.agentRole });
+    if (!usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)) {
+      resources.push({ kind: "agent", id: stage.agentRole });
+    }
     resources.push({ kind: "agent", id: stage.verifierRole });
     resources.push(...stage.skills.map((id) => ({ kind: "skill" as const, id })));
     resources.push(...stage.mcpResources.map((id) => ({ kind: "mcp_resource" as const, id })));

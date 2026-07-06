@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { usesAgentMatrixStaticCheckExecutor } from "./builtin-stage-executors.js";
 import { AgentMatrixError } from "./errors.js";
 import type { WorkflowDefinition } from "./types.js";
 
@@ -46,7 +47,12 @@ export async function assertOpencodeAgentDefinitionsAvailable(
 
 function opencodeAgentRoles(workflow: WorkflowDefinition) {
   return [
-    ...new Set(workflow.stages.flatMap((stage) => [stage.agentRole, stage.verifierRole]))
+    ...new Set(
+      workflow.stages.flatMap((stage) => [
+        ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id) ? [] : [stage.agentRole]),
+        stage.verifierRole
+      ])
+    )
   ];
 }
 

@@ -29,11 +29,11 @@ Use OpenCode as the runtime adapter with:
 node dist/cli.js run --runtime opencode
 ```
 
-`run` and `resume` also accept `--opencode-bin <path>`, `--opencode-model <provider/model>`, `--opencode-attach <url>`, and `--opencode-auto` when `--runtime opencode` is selected. The OpenCode adapter invokes `opencode run --agent <role> --dir <project> --format json` for each execution and verifier role declared by the workflow. Execution agents are expected to write the declared stage outputs, including `stage_report`; verifier agents are expected to write verifier evidence with an `accepted` boolean.
+`run` and `resume` also accept `--opencode-bin <path>`, `--opencode-model <provider/model>`, `--opencode-attach <url>`, and `--opencode-auto` when `--runtime opencode` is selected. The OpenCode adapter invokes `opencode run --agent <role> --dir <project> --format json` for platform-managed execution roles and verifier roles declared by the workflow. For the built-in `mr-preflight` `static_check` stage, AgentMatrix executes discovered static gates through its scheduler first, running read-only gates in one parallel group and serializing writer gates, then invokes the `static_check_verifier` OpenCode agent against the generated evidence. Execution agents are expected to write the declared stage outputs, including `stage_report`; verifier agents are expected to write verifier evidence with an `accepted` boolean.
 
 Pass `--verbose` to `run` or `resume` to print runtime command details. For OpenCode runs, verbose output includes each executor and verifier invocation, the redacted command, exit code, stdout, and stderr.
 
-The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction; static and test commands are discovered by, or injected into, the runtime adapter rather than stored in workflow YAML.
+The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction; static and test commands are discovered by, or injected into, the runtime adapter rather than stored in workflow YAML. `agentmatrix init --platform opencode` therefore installs OpenCode templates for later stage executors plus all verifiers, but intentionally does not create a `static_check` executor template for the built-in workflow.
 
 Workflow YAML is validated before run/resume paths use it. Validation errors include the workflow file location and the specific field path that needs attention.
 
@@ -55,7 +55,7 @@ To run the opt-in real OpenCode integration test, install and configure the `ope
 AGENTMATRIX_OPENCODE_INTEGRATION=1 npm run test:opencode
 ```
 
-The integration test creates a temporary project, initializes the full `mr-preflight` workflow, writes deterministic test-only OpenCode agent templates for every execution and verifier role, and runs the real `opencode run` path through `agentmatrix run --runtime opencode`. It validates agent lookup, OpenCode CLI invocation, file writeback, and AgentMatrix run-state transitions.
+The integration test creates a temporary project, initializes the full `mr-preflight` workflow, writes deterministic test-only OpenCode agent templates for platform-managed execution roles and verifier roles, and runs the real `opencode run` path through `agentmatrix run --runtime opencode`. It validates agent lookup, OpenCode CLI invocation, file writeback, and AgentMatrix run-state transitions.
 
 Optional environment variables:
 

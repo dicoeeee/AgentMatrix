@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AgentMatrixError, CliUsageError } from "./errors.js";
 import { createMockRuntimeAdapter } from "./mock-runtime.js";
 import { createOpencodeRuntimeAdapter, type OpencodeRuntimeOptions } from "./opencode-runtime.js";
+import type { PlatformKind } from "./opencode-platform.js";
 import {
   createRun,
   initializeProject,
@@ -68,7 +69,12 @@ const COMMAND_HELP: Record<string, string> = {
 Create the project-local AgentMatrix skeleton under .agentmatrix/.
 
 Usage:
-  agentmatrix [--project <dir>] init [--workflow mr-preflight]
+  agentmatrix [--project <dir>] init [--workflow mr-preflight] [--platform opencode] [--force]
+
+Options:
+  --workflow <workflow>  Built-in workflow template to install: mr-preflight
+  --platform opencode   Also install OpenCode agent templates for the workflow roles
+  --force               Overwrite existing OpenCode agent templates; config and workflow files are still preserved
 `,
   run: `agentmatrix run
 
@@ -163,11 +169,19 @@ export async function runCli(argv: string[], io: CliIo = process): Promise<numbe
 }
 
 async function handleInit(projectRoot: string, args: string[], io: CliIo) {
-  const { workflowId } = parseInitArgs(args);
-  const result = await initializeProject(projectRoot, workflowId);
+  const { workflowId, platform, force } = parseInitArgs(args);
+  const result = await initializeProject(projectRoot, workflowId, {
+    platform,
+    forcePlatformTemplates: force
+  });
   const action = result.workflowCreated ? "created" : "already present";
   io.stdout.write(`Initialized AgentMatrix in ${result.projectRoot}\n`);
   io.stdout.write(`Workflow ${action}: ${path.relative(result.projectRoot, result.workflowPath)}\n`);
+  if (result.platformTemplates) {
+    io.stdout.write(
+      `OpenCode agent templates: created ${result.platformTemplates.created.length}, skipped ${result.platformTemplates.skipped.length}\n`
+    );
+  }
 }
 
 async function handleRun(projectRoot: string, args: string[], io: CliIo) {
@@ -264,6 +278,8 @@ function parseGlobalOptions(argv: string[]): GlobalParseResult {
 
 function parseInitArgs(args: string[]) {
   let workflowId = DEFAULT_WORKFLOW_ID;
+  let platform: PlatformKind | undefined;
+  let force = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
@@ -283,11 +299,35 @@ function parseInitArgs(args: string[]) {
       continue;
     }
 
+    if (token === "--platform") {
+      const value = args[index + 1];
+      if (!value) {
+        throw new CliUsageError("Missing value for --platform.");
+      }
+      platform = parsePlatform(value);
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--platform=")) {
+      platform = parsePlatform(token.slice("--platform=".length));
+      continue;
+    }
+
+    if (token === "--force") {
+      force = true;
+      continue;
+    }
+
     rejectOptionToken(token, "init");
     rejectUnexpectedPositional(token, "init");
   }
 
-  return { workflowId };
+  if (force && !platform) {
+    throw new CliUsageError("--force requires --platform opencode.");
+  }
+
+  return { workflowId, platform, force };
 }
 
 function parseWorkflowTemplate(value: string) {
@@ -298,6 +338,14 @@ function parseWorkflowTemplate(value: string) {
   throw new CliUsageError(
     `Unknown workflow template "${value}". Built-in workflows: ${BUILT_IN_WORKFLOW_IDS.join(", ")}.`
   );
+}
+
+function parsePlatform(value: string): PlatformKind {
+  if (value === "opencode") {
+    return value;
+  }
+
+  throw new CliUsageError('Platform must be "opencode".');
 }
 
 function parseOptionalPositional(args: string[], command: string, name: string) {

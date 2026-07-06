@@ -71,6 +71,17 @@ export function normalizeAvailableResources(value: unknown): AvailableResources 
   };
 }
 
+export function mergeAvailableResources(
+  existing: AvailableResources,
+  required: AvailableResources
+): AvailableResources {
+  return {
+    agents: unique([...existing.agents, ...required.agents]),
+    skills: unique([...existing.skills, ...required.skills]),
+    mcpResources: unique([...existing.mcpResources, ...required.mcpResources])
+  };
+}
+
 function requiredResourcesForWorkflow(workflow: WorkflowDefinition): RequiredResource[] {
   const resources: RequiredResource[] = [];
 

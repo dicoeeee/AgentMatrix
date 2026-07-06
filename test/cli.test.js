@@ -225,6 +225,11 @@ test("help output lists the supported MVP verbs", async () => {
   assert.equal(runHelp.code, 0, runHelp.stderr);
   assert.match(runHelp.stdout, /agentmatrix run/);
   assert.match(runHelp.stdout, /fresh workflow run/);
+
+  const initHelp = await runCli(["init", "--help"], cwd);
+  assert.equal(initHelp.code, 0, initHelp.stderr);
+  assert.match(initHelp.stdout, /--platform opencode/);
+  assert.match(initHelp.stdout, /--force/);
 });
 
 test("help output works when the CLI is invoked through a symlinked bin path", async () => {
@@ -267,6 +272,124 @@ test("init can choose the built-in mr-preflight workflow template", async () => 
   const unsupported = await runCli(["init", "--workflow", "unknown"], await tempProject());
   assert.equal(unsupported.code, 2);
   assert.match(unsupported.stderr, /Unknown workflow template/);
+});
+
+test("init --platform opencode creates OpenCode templates for every mr-preflight role", async () => {
+  const cwd = await tempProject();
+  const result = await runCli(["init", "--platform", "opencode"], cwd);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /OpenCode agent templates: created 8, skipped 0/);
+
+  const agentsDir = path.join(cwd, ".opencode", "agents");
+  const entries = (await readdir(agentsDir)).sort();
+  assert.deepEqual(entries, [
+    "code_review.md",
+    "code_review_verifier.md",
+    "mr_prepare.md",
+    "mr_prepare_verifier.md",
+    "static_check.md",
+    "static_check_verifier.md",
+    "test_check.md",
+    "test_check_verifier.md"
+  ]);
+
+  const staticCheck = await readFile(path.join(agentsDir, "static_check.md"), "utf8");
+  assert.match(staticCheck, /description: "AgentMatrix executor for static_check"/);
+  assert.match(staticCheck, /tools:/);
+  assert.match(staticCheck, /write: true/);
+  assert.match(staticCheck, /AGENTMATRIX_CONTEXT_JSON/);
+  assert.doesNotMatch(staticCheck, /No static check gates were discovered/);
+
+  const verifier = await readFile(path.join(agentsDir, "static_check_verifier.md"), "utf8");
+  assert.match(verifier, /description: "AgentMatrix verifier for static_check"/);
+  assert.match(verifier, /write: true/);
+  assert.match(verifier, /bash: false/);
+  assert.match(verifier, /Write only the verifier evidence JSON/);
+});
+
+test("init --platform opencode is idempotent and reports skipped templates", async () => {
+  const cwd = await tempProject();
+  const first = await runCli(["init", "--platform", "opencode"], cwd);
+  const templatePath = path.join(cwd, ".opencode", "agents", "static_check.md");
+  const firstTemplate = await readFile(templatePath, "utf8");
+
+  const second = await runCli(["init", "--platform", "opencode"], cwd);
+  const secondTemplate = await readFile(templatePath, "utf8");
+
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(second.code, 0, second.stderr);
+  assert.match(second.stdout, /OpenCode agent templates: created 0, skipped 8/);
+  assert.equal(secondTemplate, firstTemplate);
+});
+
+test("init --platform opencode preserves existing templates unless force is passed", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+
+  const templatePath = path.join(cwd, ".opencode", "agents", "static_check.md");
+  const configPath = path.join(cwd, ".agentmatrix", "config.json");
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const initialConfig = await readFile(configPath, "utf8");
+  const editedWorkflow = `${await readFile(workflowPath, "utf8")}\n# user comment\n`;
+  await writeFile(templatePath, "custom static_check template\n");
+  await writeFile(workflowPath, editedWorkflow);
+
+  const preserved = await runCli(["init", "--platform", "opencode"], cwd);
+  assert.equal(preserved.code, 0, preserved.stderr);
+  assert.match(preserved.stdout, /OpenCode agent templates: created 0, skipped 8/);
+  assert.equal(await readFile(templatePath, "utf8"), "custom static_check template\n");
+  assert.equal(await readFile(configPath, "utf8"), initialConfig);
+  assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
+
+  const forced = await runCli(["init", "--platform", "opencode", "--force"], cwd);
+  assert.equal(forced.code, 0, forced.stderr);
+  assert.match(forced.stdout, /OpenCode agent templates: created 8, skipped 0/);
+  assert.match(await readFile(templatePath, "utf8"), /AgentMatrix executor for static_check/);
+  assert.equal(await readFile(configPath, "utf8"), initialConfig);
+  assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
+});
+
+test("init --platform opencode merges workflow resources into config", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init"], cwd)).code, 0);
+
+  const configPath = path.join(cwd, ".agentmatrix", "config.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.availableResources = {
+    agents: ["custom_agent", "static_check"],
+    skills: ["custom_skill"],
+    mcpResources: ["custom_mcp"]
+  };
+  await writeFile(configPath, JSON.stringify(config, null, 2) + "\n");
+
+  const workflowPath = path.join(cwd, ".agentmatrix", "workflows", "mr-preflight.workflow.yml");
+  const workflow = await readFile(workflowPath, "utf8");
+  await writeFile(
+    workflowPath,
+    workflow.replace(
+      "    mcp_resources: []\n    agent_role: static_check",
+      "    mcp_resources:\n      - github\n    agent_role: static_check"
+    )
+  );
+
+  const result = await runCli(["init", "--platform", "opencode"], cwd);
+  assert.equal(result.code, 0, result.stderr);
+
+  const updated = JSON.parse(await readFile(configPath, "utf8"));
+  assert.deepEqual(updated.availableResources.agents, [
+    "custom_agent",
+    "static_check",
+    "static_check_verifier",
+    "test_check",
+    "test_check_verifier",
+    "code_review",
+    "code_review_verifier",
+    "mr_prepare",
+    "mr_prepare_verifier"
+  ]);
+  assert.deepEqual(updated.availableResources.skills, ["custom_skill", "static-check", "industry-code-review"]);
+  assert.deepEqual(updated.availableResources.mcpResources, ["custom_mcp", "github"]);
 });
 
 test("init copies an editable mr-preflight workflow with complete stage contracts", async () => {

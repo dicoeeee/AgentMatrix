@@ -7,9 +7,15 @@ import {
   assertWorkflowResourcesAvailable,
   availableResourceProvider,
   availableResourcesFromWorkflow,
+  mergeAvailableResources,
   normalizeAvailableResources,
   type ResourceProvider
 } from "./resources.js";
+import {
+  installOpencodeAgentTemplates,
+  type PlatformKind,
+  type PlatformTemplateInstallResult
+} from "./opencode-platform.js";
 import {
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKFLOW_ID,
@@ -45,6 +51,12 @@ export interface InitResult {
   projectRoot: string;
   workflowPath: string;
   workflowCreated: boolean;
+  platformTemplates?: PlatformTemplateInstallResult;
+}
+
+export interface InitOptions {
+  platform?: PlatformKind;
+  forcePlatformTemplates?: boolean;
 }
 
 export interface RuntimeOptions {
@@ -54,9 +66,14 @@ export interface RuntimeOptions {
 
 interface ProjectConfig {
   availableResources?: unknown;
+  [key: string]: unknown;
 }
 
-export async function initializeProject(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID): Promise<InitResult> {
+export async function initializeProject(
+  projectRoot: string,
+  workflowId = DEFAULT_WORKFLOW_ID,
+  options: InitOptions = {}
+): Promise<InitResult> {
   assertBuiltInWorkflow(workflowId);
   const paths = projectPaths(projectRoot);
   const workflow = parseWorkflow(DEFAULT_WORKFLOW_YAML, DEFAULT_WORKFLOW_FILE);
@@ -82,11 +99,23 @@ export async function initializeProject(projectRoot: string, workflowId = DEFAUL
   );
 
   const workflowCreated = await writeFileIfAbsent(paths.defaultWorkflowPath, DEFAULT_WORKFLOW_YAML);
+  const initializedWorkflow = parseWorkflow(await readFile(paths.defaultWorkflowPath, "utf8"), paths.defaultWorkflowPath);
+  const platformTemplates =
+    options.platform === "opencode"
+      ? await installOpencodeAgentTemplates(paths.projectRoot, initializedWorkflow, {
+          force: options.forcePlatformTemplates
+        })
+      : undefined;
+
+  if (options.platform) {
+    await mergeProjectConfigResources(paths.configPath, availableResourcesFromWorkflow(initializedWorkflow));
+  }
 
   return {
     projectRoot: paths.projectRoot,
     workflowPath: paths.defaultWorkflowPath,
-    workflowCreated
+    workflowCreated,
+    ...(platformTemplates ? { platformTemplates } : {})
   };
 }
 
@@ -825,6 +854,43 @@ async function readProjectConfig(configPath: string): Promise<ProjectConfig> {
   }
 
   throw new AgentMatrixError(`AgentMatrix config ${configPath} must be a JSON object.`);
+}
+
+async function mergeProjectConfigResources(configPath: string, requiredResources: ReturnType<typeof availableResourcesFromWorkflow>) {
+  const config = await readProjectConfig(configPath);
+  const existingResources = normalizeAvailableResources(config.availableResources);
+  const mergedResources = mergeAvailableResources(existingResources, requiredResources);
+
+  if (availableResourcesEqual(existingResources, mergedResources)) {
+    return;
+  }
+
+  await writeFile(
+    configPath,
+    JSON.stringify(
+      {
+        ...config,
+        availableResources: mergedResources
+      },
+      null,
+      2
+    ) + "\n"
+  );
+}
+
+function availableResourcesEqual(
+  left: ReturnType<typeof normalizeAvailableResources>,
+  right: ReturnType<typeof normalizeAvailableResources>
+) {
+  return (
+    stringArraysEqual(left.agents, right.agents) &&
+    stringArraysEqual(left.skills, right.skills) &&
+    stringArraysEqual(left.mcpResources, right.mcpResources)
+  );
+}
+
+function stringArraysEqual(left: string[], right: string[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 async function readLatestResumableRun(projectRoot: string): Promise<RunState> {

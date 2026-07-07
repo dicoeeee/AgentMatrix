@@ -534,6 +534,15 @@ test("driver protocol starts an interactive run and prepares the static_check ex
     ".agentmatrix/skills/static-check/SKILL.md"
   ]);
   assert.equal(prepared.stage_invocation.change_scope.status, "unknown");
+  assert.equal(prepared.stage_invocation.change_scope.reason, "Project is not inside a git work tree.");
+  assert.deepEqual(prepared.stage_invocation.change_scope.files, []);
+  assert.deepEqual(prepared.stage_invocation.change_scope.diff_summary, {
+    files_changed: 0,
+    additions: 0,
+    deletions: 0,
+    lines_changed: 0,
+    entries: []
+  });
   assert.match(prepared.stage_invocation.prompt, /safe mechanical repairs/);
   assert.match(prepared.stage_invocation.prompt, /AGENTMATRIX_CONTEXT_JSON/);
 
@@ -786,6 +795,73 @@ test("driver protocol blocks static_check repairs outside the Change Scope", asy
   assert.equal(runState.stages[0].status, "failed");
 });
 
+test("driver protocol change scope separates branch, staged, unstaged, and untracked changes", async () => {
+  const cwd = await tempProject();
+  await git(cwd, ["init", "-b", "main"]);
+  await git(cwd, ["config", "user.email", "agentmatrix@example.com"]);
+  await git(cwd, ["config", "user.name", "AgentMatrix Test"]);
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  await writeProjectText(cwd, "src/committed.ts", "export const committed = 1;\n");
+  await writeProjectText(cwd, "src/unstaged.ts", "export const unstaged = 1;\n");
+  await git(cwd, ["add", "."]);
+  await git(cwd, ["commit", "-m", "baseline"]);
+  await git(cwd, ["checkout", "-b", "feature/change-scope"]);
+
+  await writeProjectText(
+    cwd,
+    "src/committed.ts",
+    "export const committed = 2;\nexport const committedAgain = true;\n"
+  );
+  await git(cwd, ["add", "src/committed.ts"]);
+  await git(cwd, ["commit", "-m", "commit branch change"]);
+
+  await writeProjectText(cwd, "src/staged.ts", "export const staged = 1;\nexport const stagedAgain = true;\n");
+  await git(cwd, ["add", "src/staged.ts"]);
+
+  await writeProjectText(cwd, "src/unstaged.ts", "export const unstaged = 2;\n");
+  await writeProjectText(cwd, "src/untracked.ts", "export const untracked = 1;\n");
+
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const next = JSON.parse((await runCli(["driver", "next", runId], cwd)).stdout);
+  const scope = next.stage_invocation.change_scope;
+
+  assert.equal(scope.status, "known");
+  assert.equal(scope.current_branch, "feature/change-scope");
+  assert.equal(scope.default_branch, "main");
+  assert.deepEqual(scope.files, [
+    "src/committed.ts",
+    "src/staged.ts",
+    "src/unstaged.ts",
+    "src/untracked.ts"
+  ]);
+  assert.deepEqual(scope.sources, {
+    committed_files: ["src/committed.ts"],
+    staged_files: ["src/staged.ts"],
+    unstaged_files: ["src/unstaged.ts"],
+    untracked_files: ["src/untracked.ts"]
+  });
+  assert.deepEqual(
+    scope.diff_summary.entries.map((entry) => [
+      entry.source,
+      entry.path,
+      entry.additions,
+      entry.deletions
+    ]),
+    [
+      ["committed", "src/committed.ts", 2, 1],
+      ["staged", "src/staged.ts", 2, 0],
+      ["unstaged", "src/unstaged.ts", 1, 1],
+      ["untracked", "src/untracked.ts", 1, 0]
+    ]
+  );
+  assert.equal(scope.diff_summary.files_changed, 4);
+  assert.equal(scope.diff_summary.additions, 6);
+  assert.equal(scope.diff_summary.deletions, 2);
+  assert.equal(scope.diff_summary.lines_changed, 8);
+  assert.equal(scope.large_change.is_large, false);
+  assert.deepEqual(scope.suggested_check_shards, []);
+});
+
 test("driver protocol includes git change scope, large-change hints, and check shards", async () => {
   const cwd = await tempProject();
   await git(cwd, ["init", "-b", "main"]);
@@ -824,6 +900,44 @@ test("driver protocol includes git change scope, large-change hints, and check s
   assert.match(scope.large_change.reasons.join(" "), /9 changed files/);
   assert.ok(prepared.stage_invocation.suggested_check_shards.length > 0);
   assert.equal(prepared.stage_invocation.suggested_check_shards[0].files.length, 9);
+});
+
+test("driver protocol marks large changes by changed line count", async () => {
+  const cwd = await tempProject();
+  await git(cwd, ["init", "-b", "main"]);
+  await git(cwd, ["config", "user.email", "agentmatrix@example.com"]);
+  await git(cwd, ["config", "user.name", "AgentMatrix Test"]);
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  await writeProjectText(cwd, "README.md", "baseline\n");
+  await git(cwd, ["add", "."]);
+  await git(cwd, ["commit", "-m", "baseline"]);
+  await git(cwd, ["checkout", "-b", "feature/large-line-scope"]);
+
+  await writeProjectText(
+    cwd,
+    "src/large.ts",
+    Array.from({ length: 500 }, (_, index) => `export const value${index} = ${index};`).join("\n") + "\n"
+  );
+
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const next = JSON.parse((await runCli(["driver", "next", runId], cwd)).stdout);
+  const scope = next.stage_invocation.change_scope;
+
+  assert.equal(scope.status, "known");
+  assert.deepEqual(scope.files, ["src/large.ts"]);
+  assert.equal(scope.diff_summary.files_changed, 1);
+  assert.equal(scope.diff_summary.additions, 500);
+  assert.equal(scope.diff_summary.lines_changed, 500);
+  assert.equal(scope.large_change.is_large, true);
+  assert.match(scope.large_change.reasons.join(" "), /500 changed lines/);
+  assert.deepEqual(scope.suggested_check_shards, [
+    {
+      id: "typescript",
+      name: "TypeScript",
+      files: ["src/large.ts"],
+      rationale: "Inspect 1 typescript file together."
+    }
+  ]);
 });
 
 test("run always creates a fresh completed filesystem-backed run", async () => {

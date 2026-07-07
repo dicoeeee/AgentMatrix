@@ -98,7 +98,7 @@ Usage:
 
 Options:
   --workflow <workflow>  Built-in workflow template to install: mr-preflight
-  --platform opencode   Also install OpenCode agent templates for the workflow roles
+  --platform opencode   Also install OpenCode Run Driver and stage agent templates
   --force               Overwrite existing OpenCode agent templates; config and workflow files are still preserved
 `,
   run: `agentmatrix run

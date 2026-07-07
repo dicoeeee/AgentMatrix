@@ -248,6 +248,7 @@ test("help output lists the supported MVP verbs", async () => {
   const initHelp = await runCli(["init", "--help"], cwd);
   assert.equal(initHelp.code, 0, initHelp.stderr);
   assert.match(initHelp.stdout, /--platform opencode/);
+  assert.match(initHelp.stdout, /OpenCode Run Driver and stage agent templates/);
   assert.match(initHelp.stdout, /--force/);
 });
 
@@ -325,7 +326,7 @@ test("init preserves existing pre-seeded skill templates", async () => {
   assert.equal(await readFile(skillPath, "utf8"), "custom static check skill\n");
 });
 
-test("init --platform opencode creates templates for platform-managed mr-preflight roles", async () => {
+test("init --platform opencode creates a primary driver and stage subagent templates", async () => {
   const cwd = await tempProject();
   const result = await runCli(["init", "--platform", "opencode"], cwd);
 
@@ -349,25 +350,46 @@ test("init --platform opencode creates templates for platform-managed mr-preflig
   const driver = await readFile(path.join(agentsDir, "agentmatrix_driver.md"), "utf8");
   assert.match(driver, /description: "AgentMatrix OpenCode Run Driver"/);
   assert.match(driver, /mode: primary/);
+  assert.doesNotMatch(driver, /mode: subagent/);
+  assert.match(driver, /Keep the driver thin/);
+  assert.match(
+    driver,
+    /AgentMatrix core owns workflow state, dependency checks, completion criteria, verifier results, rerun invalidation, and resume semantics/
+  );
+  assert.match(driver, /deterministic JSON Driver Protocol/);
   assert.match(driver, /agentmatrix driver start/);
+  assert.match(driver, /agentmatrix driver resume/);
+  assert.match(driver, /agentmatrix driver status/);
+  assert.match(driver, /agentmatrix driver next/);
+  assert.match(driver, /agentmatrix driver prepare-executor/);
+  assert.match(driver, /agentmatrix driver validate-executor/);
+  assert.match(driver, /agentmatrix driver prepare-verifier/);
   assert.match(driver, /agentmatrix driver complete-stage/);
+  assert.match(driver, /Automatically continue through successful stages/);
+  assert.match(driver, /Stop on failures, blockers, verifier rejection, or explicit user request/);
+  assert.match(driver, /Do not duplicate workflow logic/);
 
   const staticCheck = await readFile(path.join(agentsDir, "static_check.md"), "utf8");
   assert.match(staticCheck, /description: "AgentMatrix executor for static_check"/);
+  assert.match(staticCheck, /mode: subagent/);
+  assert.doesNotMatch(staticCheck, /mode: primary/);
   assert.match(staticCheck, /\.agentmatrix\/skills\/static-check\/SKILL\.md/);
   assert.match(staticCheck, /safe mechanical repairs/);
 
   const testCheck = await readFile(path.join(agentsDir, "test_check.md"), "utf8");
   assert.match(testCheck, /description: "AgentMatrix executor for test_check"/);
+  assert.match(testCheck, /mode: subagent/);
   assert.match(testCheck, /tools:/);
   assert.match(testCheck, /write: true/);
   assert.match(testCheck, /AGENTMATRIX_CONTEXT_JSON/);
 
   const codeReview = await readFile(path.join(agentsDir, "code_review.md"), "utf8");
+  assert.match(codeReview, /mode: subagent/);
   assert.match(codeReview, /\.agentmatrix\/skills\/industry-code-review\/SKILL\.md/);
 
   const verifier = await readFile(path.join(agentsDir, "static_check_verifier.md"), "utf8");
   assert.match(verifier, /description: "AgentMatrix verifier for static_check"/);
+  assert.match(verifier, /mode: subagent/);
   assert.match(verifier, /write: true/);
   assert.match(verifier, /bash: false/);
   assert.match(verifier, /Write only the verifier evidence JSON/);
@@ -454,6 +476,7 @@ test("init --platform opencode merges workflow resources into config", async () 
     "mr_prepare",
     "mr_prepare_verifier"
   ]);
+  assert.equal(updated.availableResources.agents.includes("agentmatrix_driver"), false);
   assert.deepEqual(updated.availableResources.skills, ["custom_skill", "static-check", "industry-code-review"]);
   assert.deepEqual(updated.availableResources.mcpResources, ["custom_mcp", "github"]);
 });

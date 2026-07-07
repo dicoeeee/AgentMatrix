@@ -499,6 +499,7 @@ test("opencode runtime rejects missing platform agent definitions before creatin
         assert.match(error.message, new RegExp(`agent: ${role}`));
       }
       assert.doesNotMatch(error.message, /agent: static_check\n/);
+      assert.doesNotMatch(error.message, /agent: agentmatrix_driver/);
       assert.match(error.message, /\.opencode\/agents\/static_check_verifier\.md/);
       assert.match(error.message, /opencode\.json agent\.static_check_verifier/);
       assert.match(error.message, /agentmatrix init --platform opencode/);

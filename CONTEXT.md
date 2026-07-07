@@ -16,6 +16,21 @@ _Avoid_: Session
 The user-facing controller that advances a run through workflow stages while AgentMatrix remains authoritative for run state, evidence, and verification.
 _Avoid_: CLI runner, session driver
 
+**Run Trace**:
+An append-only structured record of observable execution milestones for one run, used as a visualization index.
+It records stage boundaries, agent/subagent activity summaries, command or script summaries, executor outcomes, verifier checks, final decisions, and links to detailed logs or evidence.
+It does not expose hidden model reasoning.
+_Avoid_: Console log, transcript, hidden chain-of-thought, full audit log, visualization cache
+
+**Stage Log**:
+A per-stage, per-role detailed log for executor, verifier, or child subagent activity.
+Run Trace events may link to stage logs, but logs are not workflow state and are not the primary visualization model.
+_Avoid_: Run trace, run state, verifier evidence
+
+**Run Detail View**:
+An HTML visualization of one run that reads Run Trace, run state, stage reports, evidence, and Stage Log links to show the stage flow and per-stage execution details.
+_Avoid_: Mermaid graph, terminal verbose output, log file
+
 **Driver Protocol**:
 The deterministic command contract a run driver uses to inspect and advance a run without owning workflow state-machine decisions.
 _Avoid_: Agent API, orchestration API

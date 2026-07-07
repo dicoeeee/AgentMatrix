@@ -166,6 +166,48 @@ async function writeProjectText(cwd, relativePath, data) {
   await writeFile(filePath, data);
 }
 
+async function writeDriverStageReport(cwd, invocation, overrides = {}) {
+  await writeProjectJson(cwd, invocation.stage_report_path, {
+    schema_version: 1,
+    run_id: invocation.run_id,
+    stage_id: invocation.stage_id,
+    status: "success",
+    summary: `${invocation.stage_id} subagent completed.`,
+    commands: [],
+    findings: [],
+    artifacts: [invocation.stage_report_path],
+    skipped: [],
+    changed_files: [],
+    blockers: [],
+    ...overrides
+  });
+}
+
+async function writeDriverExecutorEvidence(cwd, invocation, overrides = {}) {
+  await writeProjectJson(cwd, invocation.executor_evidence_path, {
+    schema_version: 1,
+    run_id: invocation.run_id,
+    stage_id: invocation.stage_id,
+    agent_role: invocation.agent_role,
+    status: "success",
+    summary: `${invocation.stage_id} executor completed.`,
+    ...overrides
+  });
+}
+
+async function writeDriverVerifierEvidence(cwd, invocation, overrides = {}) {
+  await writeProjectJson(cwd, invocation.verifier_evidence_path, {
+    schema_version: 1,
+    run_id: invocation.run_id,
+    stage_id: invocation.stage_id,
+    verifier_role: invocation.agent_role,
+    accepted: true,
+    checked_artifact: invocation.stage_report_path,
+    summary: `${invocation.stage_id} verifier accepted.`,
+    ...overrides
+  });
+}
+
 async function readJsonLines(filePath) {
   return (await readFile(filePath, "utf8"))
     .split(/\r?\n/)
@@ -553,7 +595,42 @@ test("driver protocol starts an interactive run and prepares the static_check ex
   assert.equal(prepared.stage_invocation.invocation_kind, "executor");
   assert.equal(prepared.stage_invocation.agent_role, "static_check");
   assert.equal(prepared.stage_invocation.platform_role, "subagent");
+  assert.deepEqual(prepared.stage_invocation.expected_output_paths, [
+    {
+      id: "stage_report",
+      path: path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "stage-report.json"),
+      required: true,
+      schema: "stage_report"
+    }
+  ]);
+  assert.deepEqual(prepared.stage_invocation.expected_evidence_paths, [
+    path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "executor-evidence.json")
+  ]);
   assert.deepEqual(prepared.stage_invocation.required_skill_paths, [
+    ".agentmatrix/skills/static-check/SKILL.md"
+  ]);
+  assert.deepEqual(prepared.stage_invocation.context.stage, {
+    id: "static_check",
+    name: "Static Check",
+    depends_on: [],
+    agent_role: "static_check",
+    verifier_role: "static_check_verifier",
+    skills: ["static-check"],
+    mcp_resources: []
+  });
+  assert.deepEqual(prepared.stage_invocation.context.completion_criteria, [
+    { type: "output_exists", output: "stage_report" },
+    { type: "schema_valid", output: "stage_report", schema: "stage_report" },
+    { type: "commands_ok" },
+    { type: "no_blockers" },
+    { type: "skip_reason_present" }
+  ]);
+  assert.deepEqual(prepared.stage_invocation.context.repair_policy, {
+    allow_repair: true,
+    max_attempts: 1,
+    writes_allowed: true
+  });
+  assert.deepEqual(prepared.stage_invocation.context.required_skill_paths, [
     ".agentmatrix/skills/static-check/SKILL.md"
   ]);
   assert.equal(prepared.stage_invocation.change_scope.status, "unknown");
@@ -767,6 +844,101 @@ test("driver protocol stops when verifier evidence rejects a stage", async () =>
   assert.equal(runState.stages[0].status, "failed");
   assert.equal(runState.stages[0].failure.kind, "verifier_failure");
   assert.equal(runState.stages[1].status, "pending");
+});
+
+test("driver protocol completes a skipped stage after verifier acceptance", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const invocation = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout).stage_invocation;
+
+  await writeDriverStageReport(cwd, invocation, {
+    status: "skipped",
+    summary: "Static-check subagent found no supported checks.",
+    skipped: [
+      {
+        id: "static-gates",
+        reason: "No static check gates were discovered."
+      }
+    ]
+  });
+  await writeDriverExecutorEvidence(cwd, invocation);
+
+  const validated = JSON.parse((await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(validated.next_action, "prepare_verifier");
+
+  const verifier = JSON.parse((await runCli(["driver", "prepare-verifier", runId, "--stage", "static_check"], cwd)).stdout);
+  await writeDriverVerifierEvidence(cwd, verifier.stage_invocation);
+
+  const completed = JSON.parse((await runCli(["driver", "complete-stage", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(completed.stage_status, "skipped");
+  assert.equal(completed.run_status, "running");
+  assert.equal(completed.next_stage_id, "test_check");
+  assert.equal(completed.next_action, "prepare_executor");
+
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.stages[0].status, "skipped");
+  assert.deepEqual(runState.stages[0].artifacts, [invocation.stage_report_path]);
+  assert.deepEqual(runState.stages[0].evidence, [
+    invocation.executor_evidence_path,
+    verifier.stage_invocation.verifier_evidence_path
+  ]);
+  assert.equal(runState.stages[1].status, "pending");
+});
+
+test("driver protocol invalidates stale stages after a repaired stage reports changed files or artifacts", async () => {
+  for (const repairReport of [
+    {
+      summary: "Test-check subagent repaired source and passed.",
+      changed_files: ["src/fixed.ts"]
+    },
+    {
+      summary: "Test-check subagent refreshed a prior artifact and passed.",
+      changed_artifacts: ["static_check/stage-report.json"]
+    }
+  ]) {
+    const cwd = await tempProject();
+    assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+    const run = await runCli(["run"], cwd);
+    assert.equal(run.code, 0, run.stderr);
+    const runId = parseRunId(run.stdout);
+    await makeFailedAtTestCheck(cwd, runId);
+
+    const resumed = JSON.parse((await runCli(["driver", "resume", runId], cwd)).stdout);
+    assert.equal(resumed.run_status, "running");
+    assert.equal(resumed.next_stage_id, "test_check");
+
+    const invocation = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout).stage_invocation;
+    assert.equal(invocation.stage_id, "test_check");
+    await writeDriverStageReport(cwd, invocation, repairReport);
+    await writeDriverExecutorEvidence(cwd, invocation);
+
+    const validated = JSON.parse((await runCli(["driver", "validate-executor", runId, "--stage", "test_check"], cwd)).stdout);
+    assert.equal(validated.next_action, "prepare_verifier");
+
+    const verifier = JSON.parse((await runCli(["driver", "prepare-verifier", runId, "--stage", "test_check"], cwd)).stdout);
+    await writeDriverVerifierEvidence(cwd, verifier.stage_invocation);
+
+    const completed = JSON.parse((await runCli(["driver", "complete-stage", runId, "--stage", "test_check"], cwd)).stdout);
+    assert.equal(completed.run_status, "running");
+    assert.equal(completed.stage_id, "test_check");
+    assert.equal(completed.stage_status, "pending");
+    assert.equal(completed.next_stage_id, "static_check");
+    assert.equal(completed.next_action, "prepare_executor");
+
+    const runState = await readRunState(cwd, runId);
+    assert.deepEqual(
+      runState.stages.map((stage) => [stage.id, stage.status]),
+      [
+        ["static_check", "pending"],
+        ["test_check", "pending"],
+        ["code_review", "pending"],
+        ["mr_prepare", "pending"]
+      ]
+    );
+    assert.deepEqual(runState.stages[0].evidence, []);
+    assert.deepEqual(runState.stages[1].evidence, []);
+  }
 });
 
 test("driver protocol blocks static_check repairs outside the Change Scope", async () => {

@@ -599,7 +599,7 @@ function driverStageExecutionSpec(
     outputs: outputSpecs(runState.artifactPath, stage.outputs),
     inputs: stage.inputs,
     completion_criteria: stage.completionCriteria,
-    repair_policy: stage.repairPolicy,
+    repair_policy: repairPolicySpec(stage.repairPolicy),
     rerun_when: stage.rerunWhen,
     required_skill_paths: stage.skills.map((skill) => workflowSkillTemplateRelativePath(skill)),
     change_scope: changeScope,
@@ -690,6 +690,14 @@ function stageSpec(stage: RunStageState) {
     verifier_role: stage.verifierRole,
     skills: stage.skills,
     mcp_resources: stage.mcpResources
+  };
+}
+
+function repairPolicySpec(repairPolicy: RunStageState["repairPolicy"]) {
+  return {
+    allow_repair: repairPolicy.allowRepair,
+    max_attempts: repairPolicy.maxAttempts,
+    writes_allowed: repairPolicy.writesAllowed
   };
 }
 

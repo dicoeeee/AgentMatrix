@@ -12,6 +12,10 @@ import {
   type WorkspaceSnapshot
 } from "./stage-command-utils.js";
 import type { StageReport, StageReportCommand, StageReportSkippedItem } from "./stage-report.js";
+import {
+  selectStaticCheckLanguageReferences,
+  type StaticCheckLanguageReference
+} from "./static-check-references.js";
 import type { StageExecutionContext, StageExecutionResult } from "./types.js";
 
 export type StaticCheckGateMode = "read-only" | "writer";
@@ -28,20 +32,6 @@ export interface StaticCheckGate {
 
 export interface StaticCheckOptions {
   gates?: StaticCheckGate[];
-}
-
-interface StaticCheckLanguage {
-  id: string;
-  name: string;
-  reference: string;
-  matches: string[];
-}
-
-interface LanguageDefinition {
-  id: string;
-  name: string;
-  reference: string;
-  matches(relativePath: string): boolean;
 }
 
 interface StaticCheckPlan {
@@ -72,99 +62,12 @@ const ISOLATION_COPY_IGNORED_DIRECTORIES = new Set([
   "target"
 ]);
 
-const LANGUAGE_DEFINITIONS: LanguageDefinition[] = [
-  {
-    id: "c",
-    name: "C",
-    reference: "static-check/references/c.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".c", ".h"]) || basenameEquals(relativePath, "compile_commands.json")
-  },
-  {
-    id: "cpp",
-    name: "C++",
-    reference: "static-check/references/cpp.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"]) ||
-      basenameEquals(relativePath, "compile_commands.json")
-  },
-  {
-    id: "java",
-    name: "Java",
-    reference: "static-check/references/java.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".java"]) ||
-      basenameEquals(relativePath, "pom.xml") ||
-      basenameEquals(relativePath, "build.gradle") ||
-      basenameEquals(relativePath, "build.gradle.kts") ||
-      basenameEquals(relativePath, "settings.gradle") ||
-      basenameEquals(relativePath, "settings.gradle.kts")
-  },
-  {
-    id: "go",
-    name: "Go",
-    reference: "static-check/references/go.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".go"]) ||
-      basenameEquals(relativePath, "go.mod") ||
-      basenameEquals(relativePath, "go.work")
-  },
-  {
-    id: "rust",
-    name: "Rust",
-    reference: "static-check/references/rust.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".rs"]) ||
-      basenameEquals(relativePath, "Cargo.toml") ||
-      basenameEquals(relativePath, "Cargo.lock")
-  },
-  {
-    id: "javascript",
-    name: "JavaScript",
-    reference: "static-check/references/javascript.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".js", ".mjs", ".cjs", ".jsx"]) ||
-      basenameEquals(relativePath, "package.json") ||
-      basenameEquals(relativePath, "package-lock.json") ||
-      basenameEquals(relativePath, "yarn.lock") ||
-      basenameEquals(relativePath, "pnpm-lock.yaml")
-  },
-  {
-    id: "typescript",
-    name: "TypeScript",
-    reference: "static-check/references/typescript.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".ts", ".tsx", ".mts", ".cts"]) ||
-      (basenameStartsWith(relativePath, "tsconfig") && hasExtension(relativePath, [".json"]))
-  },
-  {
-    id: "python",
-    name: "Python",
-    reference: "static-check/references/python.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".py"]) ||
-      basenameEquals(relativePath, "pyproject.toml") ||
-      basenameEquals(relativePath, "setup.cfg") ||
-      basenameEquals(relativePath, "poetry.lock") ||
-      basenameEquals(relativePath, "uv.lock") ||
-      (basenameStartsWith(relativePath, "requirements") && hasExtension(relativePath, [".txt"]))
-  },
-  {
-    id: "shell",
-    name: "Shell",
-    reference: "static-check/references/shell.md",
-    matches: (relativePath) =>
-      hasExtension(relativePath, [".sh", ".bash", ".zsh", ".ksh"]) ||
-      basenameEquals(relativePath, "Makefile")
-  }
-];
-
 export async function executeStaticCheckStage(
   context: StageExecutionContext,
   options: StaticCheckOptions = {}
 ): Promise<StageExecutionResult> {
   const projectFiles = await listProjectFiles(context.projectRoot);
-  const languages = selectLanguageReferences(projectFiles);
+  const languages = selectStaticCheckLanguageReferences(projectFiles);
   const plan = options.gates ? { gates: options.gates, skipped: [] } : await discoverStaticCheckPlan(context.projectRoot);
 
   if (plan.gates.length === 0) {
@@ -437,24 +340,6 @@ function makeTargetGate(
   };
 }
 
-function selectLanguageReferences(projectFiles: string[]): StaticCheckLanguage[] {
-  return LANGUAGE_DEFINITIONS.flatMap((definition) => {
-    const matches = projectFiles.filter((relativePath) => definition.matches(relativePath));
-    if (matches.length === 0) {
-      return [];
-    }
-
-    return [
-      {
-        id: definition.id,
-        name: definition.name,
-        reference: definition.reference,
-        matches: matches.slice(0, 25)
-      }
-    ];
-  });
-}
-
 async function listProjectFiles(projectRoot: string) {
   const files: string[] = [];
 
@@ -510,7 +395,7 @@ function staticCheckSummary(
   status: StageReport["status"],
   commands: StageReportCommand[],
   skipped: StageReportSkippedItem[],
-  languages: StaticCheckLanguage[]
+  languages: StaticCheckLanguageReference[]
 ) {
   if (status === "failed") {
     const failed = commands.filter((command) => command.status === "failed").length;
@@ -545,19 +430,6 @@ function firstOutputLine(output: string) {
 
 function appendSummary(current: string | undefined, addition: string) {
   return current ? `${current} ${addition}` : addition;
-}
-
-function hasExtension(relativePath: string, extensions: string[]) {
-  const extension = path.posix.extname(relativePath).toLowerCase();
-  return extensions.includes(extension);
-}
-
-function basenameEquals(relativePath: string, basename: string) {
-  return path.posix.basename(relativePath) === basename;
-}
-
-function basenameStartsWith(relativePath: string, prefix: string) {
-  return path.posix.basename(relativePath).startsWith(prefix);
 }
 
 function toProjectRelative(projectRoot: string, filePath: string) {

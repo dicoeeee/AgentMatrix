@@ -768,6 +768,11 @@ test("driver protocol validates executor output, prepares verifier work, and com
   assert.equal(verifier.stage_invocation.invocation_kind, "verifier");
   assert.equal(verifier.stage_invocation.agent_role, "static_check_verifier");
   assert.equal(verifier.stage_invocation.platform_role, "subagent");
+  assert.match(
+    verifier.stage_invocation.prompt,
+    /Validate the report schema, run and stage identity, evidence presence, failed commands, blockers, unexplained out-of-scope changes, obvious scope omissions, and changed-file reporting/
+  );
+  assert.match(verifier.stage_invocation.prompt, /Do not rerun the full static-check workload/);
 
   await writeProjectJson(cwd, verifier.stage_invocation.verifier_evidence_path, {
     schema_version: 1,
@@ -1095,6 +1100,42 @@ test("driver protocol includes git change scope, large-change hints, and check s
   assert.match(scope.large_change.reasons.join(" "), /9 changed files/);
   assert.ok(prepared.stage_invocation.suggested_check_shards.length > 0);
   assert.equal(prepared.stage_invocation.suggested_check_shards[0].files.length, 9);
+
+  assert.equal(prepared.stage_invocation.agent_role, "static_check");
+  assert.equal(prepared.stage_invocation.platform_role, "subagent");
+  assert.equal(prepared.stage_invocation.context.static_check.skill_path, ".agentmatrix/skills/static-check/SKILL.md");
+  assert.deepEqual(prepared.stage_invocation.context.static_check.language_references, [
+    {
+      id: "typescript",
+      name: "TypeScript",
+      path: ".agentmatrix/skills/static-check/references/typescript.md",
+      matches: [
+        "src/change-0.ts",
+        "src/change-1.ts",
+        "src/change-2.ts",
+        "src/change-3.ts",
+        "src/change-4.ts",
+        "src/change-5.ts",
+        "src/change-6.ts",
+        "src/change-7.ts",
+        "src/change-8.ts"
+      ]
+    }
+  ]);
+  assert.match(
+    prepared.stage_invocation.context.static_check.changed_file_reporting,
+    /stage_report\.changed_files/
+  );
+  assert.match(
+    prepared.stage_invocation.context.static_check.repair_limits.safe_mechanical_changes.join(" "),
+    /formatter output/
+  );
+  assert.match(
+    prepared.stage_invocation.context.static_check.repair_limits.blockers.join(" "),
+    /Behavior changes/
+  );
+  assert.match(prepared.stage_invocation.prompt, /Record every repaired file exactly in stage_report\.changed_files/);
+  assert.doesNotMatch(prepared.stage_invocation.prompt, /built-in scheduler/);
 });
 
 test("driver protocol marks large changes by changed line count", async () => {

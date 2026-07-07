@@ -48,6 +48,7 @@ import {
   type StageReportBlocker,
   type StageReportCommand
 } from "./stage-report.js";
+import { selectStaticCheckLanguageReferences } from "./static-check-references.js";
 import { parseWorkflow } from "./workflow.js";
 
 const CONFIG_FILE = "config.json";
@@ -604,7 +605,8 @@ function driverStageExecutionSpec(
     required_skill_paths: stage.skills.map((skill) => workflowSkillTemplateRelativePath(skill)),
     change_scope: changeScope,
     large_change: changeScope.large_change,
-    suggested_check_shards: changeScope.suggested_check_shards
+    suggested_check_shards: changeScope.suggested_check_shards,
+    ...staticCheckGuidance(stage, changeScope)
   };
 }
 
@@ -642,12 +644,7 @@ function driverStagePrompt(
   const instructions =
     invocationKind === "executor"
       ? driverExecutorInstructions(stage)
-      : [
-          "Verify the declared stage report, outputs, evidence, and completion criteria.",
-          "Do not repeat the executor workload. Validate the report shape, evidence presence, obvious scope omissions, failures, blockers, and changed-file reporting.",
-          "Write only the verifier evidence JSON at the path declared in the context.",
-          "Set accepted to true only when the stage evidence satisfies the declared criteria."
-        ];
+      : driverVerifierInstructions(stage);
 
   return [
     roleLine,
@@ -674,11 +671,31 @@ function driverExecutorInstructions(stage: RunStageState) {
       "Use the project-local static-check skill and only the relevant language references from the invocation context.",
       "Focus static analysis on the provided Change Scope; if the scope is unknown, state that limitation explicitly in skipped coverage or blockers.",
       "safe mechanical repairs are limited to formatter output, lint autofix, import ordering, or project-tool-generated static fixes.",
-      "Behavior changes, public API changes, broad refactors, unsafe repairs, and out-of-scope repair needs must be reported as blockers."
+      "Behavior changes, public API changes, broad refactors, unsafe repairs, and out-of-scope repair needs must be reported as blockers.",
+      "Record every repaired file exactly in stage_report.changed_files; leave it empty when no files changed."
     );
   }
 
   return instructions;
+}
+
+function driverVerifierInstructions(stage: RunStageState) {
+  if (stage.id === "static_check") {
+    return [
+      "Verify the declared stage report, outputs, evidence, and completion criteria.",
+      "Validate the report schema, run and stage identity, evidence presence, failed commands, blockers, unexplained out-of-scope changes, obvious scope omissions, and changed-file reporting.",
+      "Do not rerun the full static-check workload.",
+      "Write only the verifier evidence JSON at the path declared in the context.",
+      "Set accepted to true only when the stage evidence satisfies the declared criteria."
+    ];
+  }
+
+  return [
+    "Verify the declared stage report, outputs, evidence, and completion criteria.",
+    "Do not repeat the executor workload. Validate the report shape, evidence presence, obvious scope omissions, failures, blockers, and changed-file reporting.",
+    "Write only the verifier evidence JSON at the path declared in the context.",
+    "Set accepted to true only when the stage evidence satisfies the declared criteria."
+  ];
 }
 
 function stageSpec(stage: RunStageState) {
@@ -691,6 +708,51 @@ function stageSpec(stage: RunStageState) {
     skills: stage.skills,
     mcp_resources: stage.mcpResources
   };
+}
+
+function staticCheckGuidance(stage: RunStageState, changeScope: ChangeScope) {
+  if (stage.id !== "static_check") {
+    return {};
+  }
+
+  return {
+    static_check: {
+      skill_path: workflowSkillTemplateRelativePath("static-check"),
+      language_references: staticCheckLanguageReferences(changeScope),
+      language_reference_selection:
+        "References are selected from known Change Scope files. If the scope is unknown or empty, inspect project clues and read only relevant static-check references.",
+      repair_limits: {
+        safe_mechanical_changes: [
+          "formatter output",
+          "lint autofix",
+          "import ordering",
+          "project-tool-generated static fixes"
+        ],
+        blockers: [
+          "Behavior changes",
+          "public API changes",
+          "broad refactors",
+          "unsafe repairs",
+          "out-of-scope repair needs"
+        ]
+      },
+      changed_file_reporting:
+        "Record every repaired file exactly in stage_report.changed_files; leave it empty when no files changed."
+    }
+  };
+}
+
+function staticCheckLanguageReferences(changeScope: ChangeScope) {
+  if (changeScope.status !== "known") {
+    return [];
+  }
+
+  return selectStaticCheckLanguageReferences(changeScope.files).map((reference) => ({
+    id: reference.id,
+    name: reference.name,
+    path: normalizeWorkflowPath(path.join(AGENTMATRIX_DIR, "skills", reference.reference)),
+    matches: reference.matches
+  }));
 }
 
 function repairPolicySpec(repairPolicy: RunStageState["repairPolicy"]) {

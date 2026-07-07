@@ -891,6 +891,163 @@ test("driver protocol completes a skipped stage after verifier acceptance", asyn
   assert.equal(runState.stages[1].status, "pending");
 });
 
+test("driver protocol records run trace milestones and visualize --open renders a run detail view", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+
+  for (const stageId of ["static_check", "test_check", "code_review", "mr_prepare"]) {
+    const prepared = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout);
+    assert.equal(prepared.stage_id, stageId);
+    const invocation = prepared.stage_invocation;
+
+    await writeDriverStageReport(cwd, invocation, {
+      summary: `${stageId} executor passed.`,
+      commands: [
+        {
+          name: `${stageId} checks`,
+          command: `npm run ${stageId}`,
+          status: "success",
+          exit_code: 0
+        }
+      ]
+    });
+    for (const output of invocation.expected_output_paths.filter((output) => output.id !== "stage_report")) {
+      await writeProjectText(cwd, output.path, `${output.id} for ${stageId}\n`);
+    }
+    await writeDriverExecutorEvidence(cwd, invocation, {
+      summary: `${stageId} executor evidence accepted.`
+    });
+
+    const validated = JSON.parse((await runCli(["driver", "validate-executor", runId, "--stage", stageId], cwd)).stdout);
+    assert.equal(validated.stage_id, stageId);
+    assert.equal(validated.next_action, "prepare_verifier");
+
+    const verifier = JSON.parse((await runCli(["driver", "prepare-verifier", runId, "--stage", stageId], cwd)).stdout);
+    await writeDriverVerifierEvidence(cwd, verifier.stage_invocation, {
+      summary: `${stageId} verifier accepted.`
+    });
+
+    const completed = JSON.parse((await runCli(["driver", "complete-stage", runId, "--stage", stageId], cwd)).stdout);
+    assert.equal(completed.stage_id, stageId);
+  }
+
+  const tracePath = path.join(cwd, ".agentmatrix", "runs", runId, "trace.jsonl");
+  const trace = await readJsonLines(tracePath);
+  assert.deepEqual(trace.map((event) => event.kind), [
+    "run_started",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "verifier_completed",
+    "stage_completed",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "verifier_completed",
+    "stage_completed",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "verifier_completed",
+    "stage_completed",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "verifier_completed",
+    "stage_completed",
+    "run_completed"
+  ]);
+  assert.ok(trace.every((event) => event.schema_version === 1));
+  assert.ok(trace.every((event) => event.run_id === runId));
+  assert.ok(trace.every((event) => typeof event.at === "string" && event.at.length > 0));
+
+  const staticPrepared = trace.find((event) => event.kind === "stage_prepared" && event.stage_id === "static_check");
+  assert.deepEqual(staticPrepared.paths, {
+    stage_report_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "stage-report.json"),
+    executor_evidence_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "executor-evidence.json")
+  });
+
+  const staticExecutorValidated = trace.find(
+    (event) => event.kind === "executor_validated" && event.stage_id === "static_check"
+  );
+  assert.equal(staticExecutorValidated.status, "success");
+  assert.match(staticExecutorValidated.summary, /static_check executor passed/);
+
+  const staticVerifierCompleted = trace.find(
+    (event) => event.kind === "verifier_completed" && event.stage_id === "static_check"
+  );
+  assert.equal(staticVerifierCompleted.status, "success");
+  assert.deepEqual(staticVerifierCompleted.paths, {
+    stage_report_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "stage-report.json"),
+    verifier_evidence_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "verifier-evidence.json")
+  });
+
+  assert.equal(trace.at(-1).kind, "run_completed");
+  assert.equal(trace.at(-1).status, "success");
+
+  const mermaid = await runCli(["visualize", runId], cwd);
+  assert.equal(mermaid.code, 0, mermaid.stderr);
+  assert.match(mermaid.stdout, /graph TD/);
+  assert.match(mermaid.stdout, /static_check \(success\)/);
+
+  const json = await runCli(["visualize", runId, "--format", "json"], cwd);
+  assert.equal(json.code, 0, json.stderr);
+  const graph = JSON.parse(json.stdout);
+  assert.equal(graph.kind, "run");
+  assert.equal(graph.runId, runId);
+  assert.deepEqual(
+    graph.nodes.map((node) => [node.id, node.status]),
+    [
+      ["static_check", "success"],
+      ["test_check", "success"],
+      ["code_review", "success"],
+      ["mr_prepare", "success"]
+    ]
+  );
+
+  const stdout = [];
+  const stderr = [];
+  const previousDisableOpen = process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+  process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = "1";
+
+  try {
+    const code = await runCliInProcess(["--project", cwd, "visualize", runId, "--open"], {
+      stdout: {
+        write(message) {
+          stdout.push(message);
+        }
+      },
+      stderr: {
+        write(message) {
+          stderr.push(message);
+        }
+      }
+    });
+
+    assert.equal(code, 0, stderr.join(""));
+  } finally {
+    if (previousDisableOpen === undefined) {
+      delete process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+    } else {
+      process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = previousDisableOpen;
+    }
+  }
+
+  assert.match(stdout.join(""), /graph TD/);
+  assert.match(stderr.join(""), /Wrote visualization HTML: \.agentmatrix\/visualizations\/run-/);
+
+  const html = await readFile(path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`), "utf8");
+  assert.match(html, /Run Detail View/);
+  assert.match(html, /Stage Flow/);
+  assert.match(html, /Static Check/);
+  assert.match(html, /Executor Validated/);
+  assert.match(html, /Verifier Completed/);
+  assert.match(html, /Run Completed/);
+  assert.match(html, /static_check executor passed/);
+  assert.match(html, /stage-report\.json/);
+});
+
 test("driver protocol invalidates stale stages after a repaired stage reports changed files or artifacts", async () => {
   for (const repairReport of [
     {

@@ -1,11 +1,13 @@
 import type {
   RunGraph,
   RunState,
+  RunStageState,
   StageStatus,
   VisualizationGraph,
   WorkflowDefinition,
   WorkflowGraph
 } from "./types.js";
+import type { RunTraceEvent, RunTraceEventKind } from "./run-trace.js";
 
 const STATUS_CLASS_DEFS: Record<StageStatus, string> = {
   pending: "fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a",
@@ -228,6 +230,305 @@ export function mermaidToHtml(title: string, mermaidSource: string) {
 `;
 }
 
+export function runDetailToHtml(
+  title: string,
+  runState: RunState,
+  traceEvents: RunTraceEvent[],
+  mermaidSource: string
+) {
+  const escapedTitle = escapeHtml(title);
+  const refresh = runState.status === "running" ? '  <meta http-equiv="refresh" content="8">\n' : "";
+  const runMilestones = traceEvents.filter((event) => !event.stage_id);
+  const escapedMermaid = escapeHtml(mermaidSource);
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+${refresh}  <title>${escapedTitle}</title>
+  <style>
+    :root {
+      color: #172033;
+      background: #f4f6f8;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f4f6f8;
+    }
+
+    header {
+      border-bottom: 1px solid #d7dee8;
+      background: #ffffff;
+      padding: 22px 32px 18px;
+    }
+
+    .eyebrow {
+      margin: 0 0 6px;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    main {
+      box-sizing: border-box;
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 26px 24px 40px;
+    }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 0;
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .summary div,
+    .section {
+      border: 1px solid #d7dee8;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .summary div {
+      padding: 14px 16px;
+    }
+
+    .summary span {
+      display: block;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .summary strong {
+      display: block;
+      margin-top: 5px;
+      font-size: 18px;
+    }
+
+    .section {
+      margin-top: 18px;
+      padding: 18px;
+    }
+
+    .stage-flow {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .flow-item,
+    .stage-detail {
+      border: 1px solid #d7dee8;
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .flow-item {
+      padding: 12px;
+    }
+
+    .flow-item span {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      background: #eef2f6;
+      color: #475467;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .badge.running { background: #e0f2fe; color: #075985; }
+    .badge.success { background: #dcfce7; color: #166534; }
+    .badge.failed { background: #fee2e2; color: #991b1b; }
+    .badge.skipped { background: #f3f4f6; color: #4b5563; }
+
+    .stage-detail {
+      margin-top: 12px;
+      padding: 14px;
+    }
+
+    .stage-heading {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .milestone-list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .milestone {
+      display: grid;
+      grid-template-columns: minmax(136px, 180px) 1fr auto;
+      gap: 10px;
+      align-items: start;
+      border-top: 1px solid #e4e9f0;
+      padding-top: 10px;
+    }
+
+    .milestone:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .event-kind {
+      color: #344054;
+      font-weight: 700;
+    }
+
+    .event-body p {
+      margin: 4px 0 0;
+      color: #475467;
+      line-height: 1.45;
+    }
+
+    .time {
+      color: #667085;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .paths {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .paths a {
+      color: #175cd3;
+      font-size: 12px;
+      text-decoration: none;
+    }
+
+    .paths a:hover {
+      text-decoration: underline;
+    }
+
+    details {
+      margin-top: 16px;
+    }
+
+    summary {
+      cursor: pointer;
+      color: #344054;
+      font-weight: 700;
+    }
+
+    pre {
+      overflow: auto;
+      border: 1px solid #d7dee8;
+      border-radius: 8px;
+      background: #101828;
+      color: #f8fafc;
+      padding: 14px;
+    }
+
+    @media (max-width: 760px) {
+      header {
+        padding: 18px 20px;
+      }
+
+      main {
+        padding: 18px 14px 32px;
+      }
+
+      .milestone {
+        grid-template-columns: 1fr;
+      }
+
+      .time {
+        white-space: normal;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">AgentMatrix Run Detail View</p>
+    <h1>${escapedTitle}</h1>
+  </header>
+  <main>
+    <section class="summary" aria-label="Run summary">
+      <div><span>Run</span><strong>${escapeHtml(runState.id)}</strong></div>
+      <div><span>Workflow</span><strong>${escapeHtml(runState.workflowId)}</strong></div>
+      <div><span>Status</span><strong>${escapeHtml(displayName(runState.status))}</strong></div>
+      <div><span>Trace events</span><strong>${traceEvents.length}</strong></div>
+    </section>
+
+    <section class="section">
+      <h2>Stage Flow</h2>
+      <ol class="stage-flow">
+        ${runState.stages.map((stage) => renderStageFlowItem(stage)).join("\n        ")}
+      </ol>
+    </section>
+
+    <section class="section">
+      <h2>Core Milestones</h2>
+      ${renderTraceEventList(runMilestones)}
+    </section>
+
+    <section class="section">
+      <h2>Stage Details</h2>
+      ${runState.stages.map((stage) => renderStageDetail(stage, traceEvents)).join("\n      ")}
+    </section>
+
+    <details>
+      <summary>Mermaid graph</summary>
+      <pre>${escapedMermaid}</pre>
+    </details>
+  </main>
+</body>
+</html>
+`;
+}
+
 function graphToMermaid(graph: VisualizationGraph, details?: RunVisualizationDetails) {
   const nodeNames = new Map(graph.nodes.map((node, index) => [node.id, `stage_${index}`]));
   const lines = ["graph TD"];
@@ -306,6 +607,85 @@ function activityLabel(activity: StageVisualizationActivity) {
   ].filter((line): line is string => Boolean(line));
 
   return lines.map((line) => escapeHtml(truncateLabel(line))).join("<br/>");
+}
+
+function renderStageFlowItem(stage: RunStageState) {
+  return `<li class="flow-item"><span>${escapeHtml(stage.name)}</span>${renderStatusBadge(stage.status)}</li>`;
+}
+
+function renderStageDetail(stage: RunStageState, traceEvents: RunTraceEvent[]) {
+  const events = traceEvents.filter((event) => event.stage_id === stage.id);
+  const executor = events.find((event) => event.kind === "executor_validated");
+  const verifier = events.find((event) => event.kind === "verifier_completed");
+  const statusSummary = [
+    executor ? `Executor ${executor.status ?? "recorded"}` : "Executor not recorded",
+    verifier ? `Verifier ${verifier.status ?? "recorded"}` : "Verifier not recorded"
+  ].join(" - ");
+
+  return `<article class="stage-detail">
+        <div class="stage-heading">
+          <h3>${escapeHtml(stage.name)}</h3>
+          <div>${renderStatusBadge(stage.status)}</div>
+        </div>
+        <p>${escapeHtml(statusSummary)}</p>
+        ${renderTraceEventList(events)}
+      </article>`;
+}
+
+function renderTraceEventList(events: RunTraceEvent[]) {
+  if (events.length === 0) {
+    return '<p>No trace milestones recorded.</p>';
+  }
+
+  return `<ol class="milestone-list">
+        ${events.map((event) => renderTraceEvent(event)).join("\n        ")}
+      </ol>`;
+}
+
+function renderTraceEvent(event: RunTraceEvent) {
+  return `<li class="milestone">
+          <span class="event-kind">${escapeHtml(eventKindLabel(event.kind))}</span>
+          <div class="event-body">
+            <strong>${escapeHtml(event.label)}</strong>
+            ${event.summary ? `<p>${escapeHtml(event.summary)}</p>` : ""}
+            ${renderTracePathLinks(event.paths)}
+          </div>
+          <div>
+            ${event.status ? renderStatusBadge(event.status) : ""}
+            <div class="time">${escapeHtml(event.at)}</div>
+          </div>
+        </li>`;
+}
+
+function renderTracePathLinks(paths: Record<string, string> | undefined) {
+  if (!paths || Object.keys(paths).length === 0) {
+    return "";
+  }
+
+  const links = Object.entries(paths).map(
+    ([name, value]) =>
+      `<a href="${escapeHtml(pathHref(value))}">${escapeHtml(displayName(name))}: ${escapeHtml(value)}</a>`
+  );
+
+  return `<div class="paths">${links.join("")}</div>`;
+}
+
+function renderStatusBadge(status: string) {
+  const normalized = status.toLowerCase();
+  const className = ["running", "success", "failed", "skipped"].includes(normalized) ? normalized : "";
+  return `<span class="badge ${className}">${escapeHtml(displayName(status))}</span>`;
+}
+
+function eventKindLabel(kind: RunTraceEventKind) {
+  return displayName(kind);
+}
+
+function pathHref(projectRelativePath: string) {
+  const normalized = projectRelativePath.replace(/\\/g, "/").replace(/\/+/g, "/");
+  if (normalized.startsWith(".agentmatrix/")) {
+    return `../${normalized.slice(".agentmatrix/".length)}`;
+  }
+  return `../../${normalized}`;
 }
 
 function displayName(id: string) {

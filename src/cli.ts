@@ -33,6 +33,7 @@ import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from 
 import { AGENTMATRIX_DIR, type RunState, type RunStageState, type StageFailureMetadata } from "./types.js";
 import {
   mermaidToHtml,
+  runDetailToHtml,
   runToGraph,
   runToMermaid,
   type RunVisualizationDetails,
@@ -40,6 +41,7 @@ import {
   workflowToGraph,
   workflowToMermaid
 } from "./visualize.js";
+import { readRunTrace } from "./run-trace.js";
 
 interface CliIo {
   stdout: { write(message: string): void; isTTY?: boolean };
@@ -364,11 +366,13 @@ async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
 
   const details = await readRunVisualizationDetails(projectRoot, runState);
   const mermaid = runToMermaid(runState, details);
+  const traceEvents = await readRunTrace(projectRoot, runState.id);
   io.stdout.write(mermaid);
   await maybeOpenVisualizationHtml(projectRoot, io, openMode, {
     title: `AgentMatrix run ${runState.id}`,
     fileStem: `run-${runState.id}`,
-    mermaid
+    mermaid,
+    ...(traceEvents.length > 0 ? { html: runDetailToHtml(`AgentMatrix run ${runState.id}`, runState, traceEvents, mermaid) } : {})
   });
 }
 
@@ -936,7 +940,7 @@ async function maybeOpenVisualizationHtml(
   projectRoot: string,
   io: CliIo,
   openMode: VisualizationOpenMode,
-  visualization: { title: string; fileStem: string; mermaid: string }
+  visualization: { title: string; fileStem: string; mermaid: string; html?: string }
 ) {
   if (openMode === "never" || (openMode === "auto" && !io.stdout.isTTY)) {
     return;
@@ -950,12 +954,12 @@ async function maybeOpenVisualizationHtml(
 
 async function writeVisualizationHtml(
   projectRoot: string,
-  visualization: { title: string; fileStem: string; mermaid: string }
+  visualization: { title: string; fileStem: string; mermaid: string; html?: string }
 ) {
   const visualizationsDir = path.join(projectRoot, AGENTMATRIX_DIR, "visualizations");
   await mkdir(visualizationsDir, { recursive: true });
   const htmlPath = path.join(visualizationsDir, `${safeFilePart(visualization.fileStem)}.html`);
-  await writeFile(htmlPath, mermaidToHtml(visualization.title, visualization.mermaid), "utf8");
+  await writeFile(htmlPath, visualization.html ?? mermaidToHtml(visualization.title, visualization.mermaid), "utf8");
   return htmlPath;
 }
 

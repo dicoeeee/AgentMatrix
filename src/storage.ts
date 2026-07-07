@@ -17,6 +17,7 @@ import {
   type PlatformKind,
   type PlatformTemplateInstallResult
 } from "./opencode-platform.js";
+import { appendRunTraceEvent } from "./run-trace.js";
 import {
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKFLOW_ID,
@@ -245,6 +246,13 @@ export async function startDriverRun(projectRoot: string, workflowId = DEFAULT_W
     message: "Interactive driver workflow run started."
   });
   await writeRun(paths.projectRoot, runState);
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "run_started",
+    status: "running",
+    label: "Run started",
+    summary: "Interactive driver workflow run started.",
+    at: runState.updatedAt
+  });
   const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
   return driverRunResult(runState, "running", "prepare_executor", changeScope);
 }
@@ -267,6 +275,13 @@ export async function resumeDriverRun(projectRoot: string, runId?: string) {
     message: "Interactive driver resume requested."
   });
   await writeRun(paths.projectRoot, runState);
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "run_resumed",
+    status: "running",
+    label: "Run resumed",
+    summary: "Interactive driver resume requested.",
+    at: runState.updatedAt
+  });
   const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
   return driverRunResult(runState, "running", "prepare_executor", changeScope);
 }
@@ -295,6 +310,7 @@ export async function prepareDriverExecutor(projectRoot: string, runId?: string)
   if (!stage) {
     if (runState.status !== "success") {
       await completeRun(paths.projectRoot, runState, "Interactive driver workflow run completed.");
+      await appendDriverRunCompletedTrace(paths.projectRoot, runState);
     }
     return driverRunResult(runState, "success", "done");
   }
@@ -309,6 +325,15 @@ export async function prepareDriverExecutor(projectRoot: string, runId?: string)
       message: `Interactive driver prepared executor for stage ${stage.id}.`
     });
     await writeRun(paths.projectRoot, runState);
+    await appendRunTraceEvent(paths.projectRoot, runState, {
+      kind: "stage_prepared",
+      stage_id: stage.id,
+      status: "running",
+      label: `${stage.name} executor prepared`,
+      summary: `Executor invocation prepared for stage ${stage.id}.`,
+      at: runState.updatedAt,
+      paths: stageExecutorTracePaths(runState, stage)
+    });
   }
 
   const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
@@ -365,6 +390,16 @@ export async function validateDriverExecutorOutput(projectRoot: string, runId: s
     return failDriverStage(paths.projectRoot, runState, stage, completionFailure);
   }
 
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "executor_validated",
+    stage_id: stage.id,
+    status: stageReport.status,
+    label: `${stage.name} executor validated`,
+    summary: stageReport.summary,
+    at: runState.updatedAt,
+    paths: stageExecutorTracePaths(runState, stage)
+  });
+
   return {
     ...driverRunResult(runState, runState.status, "prepare_verifier"),
     stage_id: stage.id,
@@ -378,6 +413,14 @@ export async function prepareDriverVerifier(projectRoot: string, runId: string, 
   const runState = await readRun(paths.projectRoot, runId);
   const stage = requireRunStage(runState, stageId);
   const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "verifier_prepared",
+    stage_id: stage.id,
+    status: "running",
+    label: `${stage.name} verifier prepared`,
+    summary: `Verifier invocation prepared for stage ${stage.id}.`,
+    paths: stageVerifierTracePaths(runState, stage)
+  });
 
   return {
     ...driverRunResult(runState, runState.status, "invoke_subagent", changeScope),
@@ -412,6 +455,17 @@ export async function completeDriverStage(projectRoot: string, runId: string, st
       message: `Verifier ${stage.verifierRole} rejected stage ${stage.id}.`
     });
     await writeRun(paths.projectRoot, runState);
+    await appendRunTraceEvent(paths.projectRoot, runState, {
+      kind: "verifier_completed",
+      stage_id: stage.id,
+      status: "failed",
+      label: `${stage.name} verifier rejected`,
+      summary: verifierEvidenceSummary(evidence) ?? failure.message,
+      at: runState.updatedAt,
+      paths: stageVerifierTracePaths(runState, stage)
+    });
+    await appendDriverStageFailedTrace(paths.projectRoot, runState, stage, failure);
+    await appendDriverRunFailedTrace(paths.projectRoot, runState, failure);
     return driverFailureResult(runState, stage, failure, "stop");
   }
 
@@ -424,6 +478,7 @@ export async function completeDriverStage(projectRoot: string, runId: string, st
 
   stage.evidence = [...new Set([...stage.evidence, verifierEvidencePath])];
   updateStage(runState, stage, stageReport.status === "skipped" ? "skipped" : "success");
+  const stageCompletedAt = runState.updatedAt;
   runState.events.push({
     at: runState.updatedAt,
     type: "stage_verified",
@@ -436,10 +491,33 @@ export async function completeDriverStage(projectRoot: string, runId: string, st
     new Set(runState.stages.filter((candidate) => candidate.id !== stage.id && candidate.status === "success").map((candidate) => candidate.id))
   );
 
-  if (!nextIncompleteStage(runState)) {
+  const runShouldComplete = !nextIncompleteStage(runState);
+  if (runShouldComplete) {
     await completeRun(paths.projectRoot, runState, "Interactive driver workflow run completed.");
   } else {
     await writeRun(paths.projectRoot, runState);
+  }
+
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "verifier_completed",
+    stage_id: stage.id,
+    status: "success",
+    label: `${stage.name} verifier accepted`,
+    summary: verifierEvidenceSummary(evidence) ?? `Verifier ${stage.verifierRole} accepted stage ${stage.id}.`,
+    at: stageCompletedAt,
+    paths: stageVerifierTracePaths(runState, stage)
+  });
+  await appendRunTraceEvent(paths.projectRoot, runState, {
+    kind: "stage_completed",
+    stage_id: stage.id,
+    status: stageReport.status === "skipped" ? "skipped" : "success",
+    label: `${stage.name} completed`,
+    summary: stageReport.summary,
+    at: stageCompletedAt,
+    paths: stageCompletedTracePaths(runState, stage)
+  });
+  if (runShouldComplete) {
+    await appendDriverRunCompletedTrace(paths.projectRoot, runState);
   }
 
   return {
@@ -866,6 +944,8 @@ async function failDriverStage(
   failure: StageFailureMetadata
 ) {
   await failStage(projectRoot, runState, stage, failure);
+  await appendDriverStageFailedTrace(projectRoot, runState, stage, failure);
+  await appendDriverRunFailedTrace(projectRoot, runState, failure);
   return driverFailureResult(runState, stage, failure, "stop");
 }
 
@@ -883,9 +963,81 @@ function driverFailureResult(
   };
 }
 
-async function readVerifierEvidence(projectRoot: string, relativePath: string): Promise<{ accepted?: unknown } | undefined> {
+function stageExecutorTracePaths(runState: RunState, stage: RunStageState) {
+  return {
+    stage_report_path: normalizeWorkflowPath(stageReportArtifactPath(runState, stage)),
+    executor_evidence_path: normalizeWorkflowPath(artifactPath(runState, stage.id, "executor-evidence.json"))
+  };
+}
+
+function stageVerifierTracePaths(runState: RunState, stage: RunStageState) {
+  return {
+    stage_report_path: normalizeWorkflowPath(stageReportArtifactPath(runState, stage)),
+    verifier_evidence_path: normalizeWorkflowPath(artifactPath(runState, stage.id, "verifier-evidence.json"))
+  };
+}
+
+function stageCompletedTracePaths(runState: RunState, stage: RunStageState) {
+  return {
+    ...stageExecutorTracePaths(runState, stage),
+    verifier_evidence_path: normalizeWorkflowPath(artifactPath(runState, stage.id, "verifier-evidence.json"))
+  };
+}
+
+async function appendDriverRunCompletedTrace(projectRoot: string, runState: RunState) {
+  await appendRunTraceEvent(projectRoot, runState, {
+    kind: "run_completed",
+    status: "success",
+    label: "Run completed",
+    summary: `Run ${runState.id} completed successfully.`,
+    at: runState.updatedAt
+  });
+}
+
+async function appendDriverRunFailedTrace(
+  projectRoot: string,
+  runState: RunState,
+  failure: StageFailureMetadata
+) {
+  await appendRunTraceEvent(projectRoot, runState, {
+    kind: "run_failed",
+    status: "failed",
+    label: "Run failed",
+    summary: failure.message,
+    at: runState.updatedAt
+  });
+}
+
+async function appendDriverStageFailedTrace(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  failure: StageFailureMetadata
+) {
+  await appendRunTraceEvent(projectRoot, runState, {
+    kind: "stage_failed",
+    stage_id: stage.id,
+    status: "failed",
+    label: `${stage.name} failed`,
+    summary: failure.message,
+    at: runState.updatedAt,
+    paths: stageCompletedTracePaths(runState, stage)
+  });
+}
+
+function verifierEvidenceSummary(evidence: { summary?: unknown } | undefined) {
+  return typeof evidence?.summary === "string" && evidence.summary.trim().length > 0 ? evidence.summary : undefined;
+}
+
+async function readVerifierEvidence(
+  projectRoot: string,
+  relativePath: string
+): Promise<{ accepted?: unknown; summary?: unknown } | undefined> {
   try {
-    return JSON.parse(await readFile(path.join(projectRoot, relativePath), "utf8")) as { accepted?: unknown };
+    return JSON.parse(await readFile(path.join(projectRoot, relativePath), "utf8")) as {
+      accepted?: unknown;
+      summary?: unknown;
+    };
   } catch {
     return undefined;
   }

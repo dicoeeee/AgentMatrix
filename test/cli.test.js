@@ -563,6 +563,27 @@ test("driver protocol reports status, next stage, and resumable run state", asyn
   assert.equal(next.run_status, "running");
   assert.equal(next.next_action, "prepare_executor");
   assert.equal(next.next_stage_id, "static_check");
+  assert.deepEqual(next.next_stage, {
+    id: "static_check",
+    name: "Static Check",
+    status: "pending",
+    agent_role: "static_check",
+    verifier_role: "static_check_verifier",
+    expected_artifact_paths: [
+      path.join(".agentmatrix", "artifacts", runId, "static_check", "stage-report.json")
+    ],
+    expected_evidence_paths: [
+      path.join(".agentmatrix", "artifacts", runId, "static_check", "executor-evidence.json"),
+      path.join(".agentmatrix", "artifacts", runId, "static_check", "verifier-evidence.json")
+    ]
+  });
+  assert.equal(next.stage_invocation.kind, "stage_invocation");
+  assert.equal(next.stage_invocation.invocation_kind, "executor");
+  assert.equal(next.stage_invocation.stage_id, "static_check");
+  assert.equal(next.stage_invocation.agent_role, "static_check");
+
+  const afterNext = await readRunState(cwd, runId);
+  assert.equal(afterNext.stages[0].status, "pending");
 
   const resumed = JSON.parse((await runCli(["driver", "resume", runId], cwd)).stdout);
   assert.equal(resumed.run_status, "running");
@@ -571,6 +592,27 @@ test("driver protocol reports status, next stage, and resumable run state", asyn
 
   const runState = await readRunState(cwd, runId);
   assert.equal(runState.events.some((event) => event.type === "resume_requested"), true);
+});
+
+test("driver protocol errors return structured JSON", async () => {
+  const cwd = await tempProject();
+  const result = await runCli(["driver", "next", "missing-run"], cwd);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "");
+  const error = JSON.parse(result.stdout);
+  assert.equal(error.schema_version, 1);
+  assert.equal(error.kind, "driver_protocol_error");
+  assert.equal(error.exit_code, 1);
+  assert.match(error.message, /Run "missing-run" was not found/);
+
+  const usage = await runCli(["driver", "complete-stage", "missing-run"], cwd);
+  assert.equal(usage.code, 2);
+  assert.equal(usage.stderr, "");
+  const usageError = JSON.parse(usage.stdout);
+  assert.equal(usageError.kind, "driver_protocol_error");
+  assert.equal(usageError.exit_code, 2);
+  assert.match(usageError.message, /requires --stage/);
 });
 
 test("driver protocol validates executor output, prepares verifier work, and completes one stage", async () => {

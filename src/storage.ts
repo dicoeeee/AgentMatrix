@@ -276,8 +276,14 @@ export async function readDriverStatus(projectRoot: string, runId?: string) {
 }
 
 export async function readDriverNextStage(projectRoot: string, runId?: string) {
-  const runState = runId ? await readRun(projectRoot, runId) : await readLatestResumableRun(projectRoot);
-  return driverRunResult(runState, runState.status, nextDriverAction(runState));
+  const paths = projectPaths(projectRoot);
+  const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
+  const stage = nextIncompleteStage(runState);
+  const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+  return {
+    ...driverRunResult(runState, runState.status, nextDriverAction(runState), changeScope),
+    ...(stage ? { stage_invocation: driverStageInvocation(runState, stage, "executor", changeScope) } : {})
+  };
 }
 
 export async function prepareDriverExecutor(projectRoot: string, runId?: string) {
@@ -712,6 +718,7 @@ function driverRunResult(
     run_status: runState.status,
     next_action: nextAction,
     next_stage_id: nextStage?.id,
+    ...(nextStage ? { next_stage: driverNextStageSummary(runState, nextStage) } : {}),
     summary: driverSummary(runState, nextAction, nextStage),
     stages: runState.stages.map((stage) => ({
       id: stage.id,
@@ -719,6 +726,21 @@ function driverRunResult(
       failure: stage.failure
     })),
     ...(changeScope ? { change_scope: changeScope } : {})
+  };
+}
+
+function driverNextStageSummary(runState: RunState, stage: RunStageState) {
+  return {
+    id: stage.id,
+    name: stage.name,
+    status: stage.status,
+    agent_role: stage.agentRole,
+    verifier_role: stage.verifierRole,
+    expected_artifact_paths: outputSpecs(runState.artifactPath, stage.outputs).map((output) => output.path),
+    expected_evidence_paths: [
+      artifactPath(runState, stage.id, "executor-evidence.json"),
+      artifactPath(runState, stage.id, "verifier-evidence.json")
+    ].map(normalizeWorkflowPath)
   };
 }
 

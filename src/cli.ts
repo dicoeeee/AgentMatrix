@@ -211,6 +211,10 @@ export async function runCli(argv: string[], io: CliIo = process): Promise<numbe
     }
   } catch (error) {
     const normalized = normalizeError(error);
+    if (argvSelectsCommand(argv, "driver")) {
+      io.stdout.write(`${JSON.stringify(driverProtocolError(normalized), null, 2)}\n`);
+      return normalized.exitCode;
+    }
     io.stderr.write(`${normalized.message}\n`);
     return normalized.exitCode;
   }
@@ -1048,6 +1052,39 @@ function normalizeError(error: unknown) {
   }
 
   return new AgentMatrixError(String(error));
+}
+
+function driverProtocolError(error: AgentMatrixError) {
+  return {
+    schema_version: 1,
+    kind: "driver_protocol_error",
+    exit_code: error.exitCode,
+    error_type: error.name,
+    message: error.message
+  };
+}
+
+function argvSelectsCommand(argv: string[], command: string) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+
+    if (token === "--project") {
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--project=")) {
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      continue;
+    }
+
+    return token === command;
+  }
+
+  return false;
 }
 
 function isCliEntrypoint(argvPath: string) {

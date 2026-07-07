@@ -49,6 +49,8 @@ node dist/cli.js driver complete-stage <run-id> --stage <stage-id>
 
 Each protocol command writes machine-readable JSON. AgentMatrix core remains authoritative for run state, dependency checks, completion criteria, verifier results, rerun invalidation, and resume semantics. The OpenCode driver invokes subagents from Stage Invocation JSON and defaults to continuing through successful stages while stopping on failures, blockers, verifier rejection, or explicit user request.
 
+`driver start`, `driver resume`, `driver status`, and `driver next` are safe inspection/tracer commands: they do not execute platform agents. `driver next` returns the current next-stage summary plus an executor Stage Invocation skeleton with role names, expected artifact paths, evidence paths, and prompt context. Driver Protocol failures return a `driver_protocol_error` JSON object with a stable `exit_code`.
+
 Driver-created Stage Invocations include a Change Scope. In git repositories the scope summarizes changed files from the default-branch merge base, staged changes, unstaged changes, and untracked files, excluding AgentMatrix runtime state. Large scopes include suggested Check Shards. Outside git repositories the scope is marked unknown so the static-check subagent can report that limitation explicitly.
 
 Pass `--verbose` to `run` or `resume` to print runtime command details. For OpenCode runs, verbose output includes each executor and verifier invocation, the redacted command, exit code, stdout, and stderr.

@@ -993,7 +993,8 @@ test("driver protocol records run trace milestones and visualize --open renders 
           name: `${stageId} checks`,
           command: `npm run ${stageId}`,
           status: "success",
-          exit_code: 0
+          exit_code: 0,
+          ...(stageId === "static_check" ? { parallel_group: "traced-static-check" } : {})
         }
       ]
     });
@@ -1130,6 +1131,8 @@ test("driver protocol records run trace milestones and visualize --open renders 
   assert.match(html, /Verifier Completed/);
   assert.match(html, /Run Completed/);
   assert.match(html, /static_check executor passed/);
+  assert.match(html, /traced-static-check/);
+  assert.match(html, /static_check checks/);
   assert.match(html, /stage-report\.json/);
 });
 
@@ -2405,7 +2408,7 @@ test("visualize renders background subagents from opencode executor evidence", a
   assert.match(mermaid.stdout, /bg_36da9cb8/);
 });
 
-test("visualize auto-generates browser HTML for interactive Mermaid output", async () => {
+test("visualize auto-generates browser Run Detail View HTML for old runs without trace", async () => {
   const cwd = await tempProject();
   const runId = await createCompletedRun(cwd);
   const stdout = [];
@@ -2444,11 +2447,30 @@ test("visualize auto-generates browser HTML for interactive Mermaid output", asy
   assert.equal(await exists(htmlPath), true);
   const html = await readFile(htmlPath, "utf8");
   assert.match(html, /<title>AgentMatrix run/);
-  assert.match(html, /class="mermaid diagram"/);
+  assert.match(html, /Run Detail View/);
+  assert.match(html, /Stage Flow/);
+  assert.match(html, /Trace events<\/span><strong>0<\/strong>/);
+  assert.match(html, /Code Review/);
+  assert.match(html, /Fallback Activity/);
+  assert.match(html, /Correctness Review/);
+  assert.match(html, /parallel group: code-review-lanes-1/);
   assert.match(html, /static_check \(success\)/);
-  assert.match(html, /mermaid@11/);
-  assert.match(html, /htmlLabels: true/);
-  assert.match(html, /themeVariables/);
+  assert.match(html, /Mermaid graph/);
+});
+
+test("visualize Run Detail View refreshes lightly for running old runs without a service", async () => {
+  const cwd = await tempProject();
+  const runId = await createCompletedRun(cwd);
+  await makeInterruptedAfterStaticCheck(cwd, runId);
+
+  const html = await renderRunDetailHtml(cwd, runId);
+  assert.match(html, /Run Detail View/);
+  assert.match(html, /<meta http-equiv="refresh" content="8">/);
+  assert.match(html, /Test Check/);
+  assert.match(html, /Running/);
+  assert.doesNotMatch(html, /WebSocket/);
+  assert.doesNotMatch(html, /EventSource/);
+  assert.doesNotMatch(html, /server-sent/i);
 });
 
 test("visualize --no-open suppresses interactive browser HTML generation", async () => {

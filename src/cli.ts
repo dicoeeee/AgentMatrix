@@ -380,7 +380,7 @@ async function handleVisualize(projectRoot: string, args: string[], io: CliIo) {
     title: `AgentMatrix run ${runState.id}`,
     fileStem: `run-${runState.id}`,
     mermaid,
-    ...(traceEvents.length > 0 ? { html: runDetailToHtml(`AgentMatrix run ${runState.id}`, runState, traceEvents, mermaid) } : {})
+    html: runDetailToHtml(`AgentMatrix run ${runState.id}`, runState, traceEvents, mermaid, details)
   });
 }
 

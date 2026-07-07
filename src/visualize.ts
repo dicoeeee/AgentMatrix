@@ -234,12 +234,14 @@ export function runDetailToHtml(
   title: string,
   runState: RunState,
   traceEvents: RunTraceEvent[],
-  mermaidSource: string
+  mermaidSource: string,
+  details?: RunVisualizationDetails
 ) {
   const escapedTitle = escapeHtml(title);
   const refresh = runState.status === "running" ? '  <meta http-equiv="refresh" content="8">\n' : "";
   const runMilestones = traceEvents.filter((event) => !event.stage_id);
   const escapedMermaid = escapeHtml(mermaidSource);
+  const activitiesByStage = new Map(details?.stages.map((stage) => [stage.stageId, stage.activities]) ?? []);
 
   return `<!doctype html>
 <html lang="en">
@@ -299,6 +301,14 @@ ${refresh}  <title>${escapedTitle}</title>
       margin: 0;
       font-size: 15px;
       letter-spacing: 0;
+    }
+
+    h4 {
+      margin: 14px 0 8px;
+      color: #344054;
+      font-size: 13px;
+      letter-spacing: 0;
+      text-transform: uppercase;
     }
 
     .summary {
@@ -403,7 +413,16 @@ ${refresh}  <title>${escapedTitle}</title>
       list-style: none;
     }
 
-    .milestone {
+    .activity-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .milestone,
+    .activity {
       display: grid;
       grid-template-columns: minmax(136px, 180px) 1fr auto;
       gap: 10px;
@@ -417,12 +436,19 @@ ${refresh}  <title>${escapedTitle}</title>
       padding-top: 0;
     }
 
-    .event-kind {
+    .activity:first-child {
+      border-top: 0;
+      padding-top: 0;
+    }
+
+    .event-kind,
+    .activity-kind {
       color: #344054;
       font-weight: 700;
     }
 
-    .event-body p {
+    .event-body p,
+    .activity-body p {
       margin: 4px 0 0;
       color: #475467;
       line-height: 1.45;
@@ -483,6 +509,10 @@ ${refresh}  <title>${escapedTitle}</title>
         grid-template-columns: 1fr;
       }
 
+      .activity {
+        grid-template-columns: 1fr;
+      }
+
       .time {
         white-space: normal;
       }
@@ -516,7 +546,9 @@ ${refresh}  <title>${escapedTitle}</title>
 
     <section class="section">
       <h2>Stage Details</h2>
-      ${runState.stages.map((stage) => renderStageDetail(stage, traceEvents)).join("\n      ")}
+      ${runState.stages
+        .map((stage) => renderStageDetail(stage, traceEvents, activitiesByStage.get(stage.id) ?? []))
+        .join("\n      ")}
     </section>
 
     <details>
@@ -613,7 +645,11 @@ function renderStageFlowItem(stage: RunStageState) {
   return `<li class="flow-item"><span>${escapeHtml(stage.name)}</span>${renderStatusBadge(stage.status)}</li>`;
 }
 
-function renderStageDetail(stage: RunStageState, traceEvents: RunTraceEvent[]) {
+function renderStageDetail(
+  stage: RunStageState,
+  traceEvents: RunTraceEvent[],
+  fallbackActivities: StageVisualizationActivity[]
+) {
   const events = traceEvents.filter((event) => event.stage_id === stage.id);
   const executor = events.find((event) => event.kind === "executor_validated");
   const verifier = events.find((event) => event.kind === "verifier_completed");
@@ -629,7 +665,33 @@ function renderStageDetail(stage: RunStageState, traceEvents: RunTraceEvent[]) {
         </div>
         <p>${escapeHtml(statusSummary)}</p>
         ${renderTraceEventList(events)}
+        ${renderFallbackActivities(fallbackActivities)}
       </article>`;
+}
+
+function renderFallbackActivities(activities: StageVisualizationActivity[]) {
+  if (activities.length === 0) {
+    return "";
+  }
+
+  return `<div class="fallback-activities">
+          <h4>Fallback Activity</h4>
+          <ol class="activity-list">
+            ${activities.map((activity) => renderFallbackActivity(activity)).join("\n            ")}
+          </ol>
+        </div>`;
+}
+
+function renderFallbackActivity(activity: StageVisualizationActivity) {
+  return `<li class="activity">
+              <span class="activity-kind">${escapeHtml(displayName(activity.kind))}</span>
+              <div class="activity-body">
+                <strong>${escapeHtml(activity.label)}</strong>
+                <p>parallel group: ${escapeHtml(activity.group)}</p>
+                ${activity.detail ? `<p>${escapeHtml(activity.detail)}</p>` : ""}
+              </div>
+              <div>${activity.status ? renderStatusBadge(activity.status) : ""}</div>
+            </li>`;
 }
 
 function renderTraceEventList(events: RunTraceEvent[]) {

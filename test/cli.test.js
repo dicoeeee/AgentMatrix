@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -31,7 +31,11 @@ async function exists(filePath) {
   }
 }
 
-async function runCli(args, cwd) {
+async function runCli(args, cwd, options = {}) {
+  if (Object.hasOwn(options, "input")) {
+    return runCliWithInput(args, cwd, options.input);
+  }
+
   try {
     const result = await execFileAsync(process.execPath, [cliPath, ...args], { cwd });
     return { code: 0, stdout: result.stdout, stderr: result.stderr };
@@ -42,6 +46,32 @@ async function runCli(args, cwd) {
       stderr: error.stderr ?? ""
     };
   }
+}
+
+async function runCliWithInput(args, cwd, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], { cwd });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({
+        code: typeof code === "number" ? code : 1,
+        stdout,
+        stderr
+      });
+    });
+    child.stdin.end(input);
+  });
 }
 
 async function git(cwd, args) {
@@ -407,6 +437,9 @@ test("init --platform opencode creates a primary driver and stage subagent templ
   assert.match(driver, /agentmatrix driver validate-executor/);
   assert.match(driver, /agentmatrix driver prepare-verifier/);
   assert.match(driver, /agentmatrix driver complete-stage/);
+  assert.match(driver, /agentmatrix driver record-event/);
+  assert.match(driver, /core records deterministic Run Trace boundaries automatically/);
+  assert.match(driver, /Record only compact platform summaries/);
   assert.match(driver, /Automatically continue through successful stages/);
   assert.match(driver, /Stop on failures, blockers, verifier rejection, or explicit user request/);
   assert.match(driver, /Do not duplicate workflow logic/);
@@ -415,6 +448,7 @@ test("init --platform opencode creates a primary driver and stage subagent templ
   assert.match(staticCheck, /description: "AgentMatrix executor for static_check"/);
   assert.match(staticCheck, /mode: subagent/);
   assert.doesNotMatch(staticCheck, /mode: primary/);
+  assert.doesNotMatch(staticCheck, /record-event/);
   assert.match(staticCheck, /\.agentmatrix\/skills\/static-check\/SKILL\.md/);
   assert.match(staticCheck, /safe mechanical repairs/);
 
@@ -434,6 +468,7 @@ test("init --platform opencode creates a primary driver and stage subagent templ
   assert.match(verifier, /mode: subagent/);
   assert.match(verifier, /write: true/);
   assert.match(verifier, /bash: false/);
+  assert.doesNotMatch(verifier, /record-event/);
   assert.match(verifier, /Write only the verifier evidence JSON/);
   assert.match(verifier, /Executor role under review: `static_check`/);
 });
@@ -1046,6 +1081,173 @@ test("driver protocol records run trace milestones and visualize --open renders 
   assert.match(html, /Run Completed/);
   assert.match(html, /static_check executor passed/);
   assert.match(html, /stage-report\.json/);
+});
+
+test("driver record-event appends platform summaries and run detail HTML renders them", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const invocation = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout).stage_invocation;
+
+  const agentEvent = {
+    stage_id: "static_check",
+    kind: "agent_invoked",
+    status: "running",
+    label: "OpenCode subagent invoked",
+    summary: "Primary driver invoked the static_check OpenCode subagent.",
+    paths: {
+      log_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "executor.log")
+    }
+  };
+  const recordedAgent = JSON.parse(
+    (
+      await runCli(["driver", "record-event", runId], cwd, {
+        input: JSON.stringify(agentEvent)
+      })
+    ).stdout
+  );
+  assert.equal(recordedAgent.kind, "driver_protocol_result");
+  assert.equal(recordedAgent.recorded_event.kind, "agent_invoked");
+  assert.equal(recordedAgent.recorded_event.run_id, runId);
+  assert.equal(recordedAgent.recorded_event.schema_version, 1);
+  assert.equal(recordedAgent.recorded_event.stage_id, "static_check");
+  assert.equal(typeof recordedAgent.recorded_event.at, "string");
+  assert.ok(recordedAgent.recorded_event.at.length > 0);
+
+  const commandAt = "2026-07-07T12:34:56.000Z";
+  const commandEvent = {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    kind: "command_completed",
+    status: "success",
+    label: "npm run lint",
+    summary: "Lint completed without embedding stdout.",
+    at: commandAt
+  };
+  const recordedCommand = JSON.parse(
+    (
+      await runCli(["driver", "record-event", runId], cwd, {
+        input: JSON.stringify(commandEvent)
+      })
+    ).stdout
+  );
+  assert.equal(recordedCommand.recorded_event.at, commandAt);
+
+  const tracePath = path.join(cwd, ".agentmatrix", "runs", runId, "trace.jsonl");
+  const trace = await readJsonLines(tracePath);
+  assert.deepEqual(
+    trace.map((event) => event.kind),
+    ["run_started", "stage_prepared", "agent_invoked", "command_completed"]
+  );
+  assert.deepEqual(trace.at(-2), recordedAgent.recorded_event);
+  assert.deepEqual(trace.at(-1), recordedCommand.recorded_event);
+
+  await writeDriverStageReport(cwd, invocation);
+  await writeDriverExecutorEvidence(cwd, invocation);
+  assert.equal((await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd)).code, 0);
+
+  const stdout = [];
+  const stderr = [];
+  const previousDisableOpen = process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+  process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = "1";
+
+  try {
+    const code = await runCliInProcess(["--project", cwd, "visualize", runId, "--open"], {
+      stdout: {
+        write(message) {
+          stdout.push(message);
+        }
+      },
+      stderr: {
+        write(message) {
+          stderr.push(message);
+        }
+      }
+    });
+
+    assert.equal(code, 0, stderr.join(""));
+  } finally {
+    if (previousDisableOpen === undefined) {
+      delete process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+    } else {
+      process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = previousDisableOpen;
+    }
+  }
+
+  assert.match(stdout.join(""), /graph TD/);
+  const html = await readFile(path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`), "utf8");
+  assert.match(html, /Agent Invoked/);
+  assert.match(html, /Command Completed/);
+  assert.match(html, /OpenCode subagent invoked/);
+  assert.match(html, /Primary driver invoked the static_check OpenCode subagent/);
+  assert.match(html, /npm run lint/);
+  assert.match(html, /Lint completed without embedding stdout/);
+  assert.doesNotMatch(html, /stdout:/);
+  assert.match(html, /executor\.log/);
+});
+
+test("driver record-event rejects malformed and invalid platform summary events", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+
+  const malformed = await runCli(["driver", "record-event", runId], cwd, { input: "{" });
+  assert.equal(malformed.code, 1);
+  assert.equal(malformed.stderr, "");
+  assert.equal(JSON.parse(malformed.stdout).kind, "driver_protocol_error");
+  assert.match(JSON.parse(malformed.stdout).message, /invalid JSON/);
+
+  const missingRun = await runCli(["driver", "record-event", "missing-run"], cwd, {
+    input: JSON.stringify({
+      kind: "agent_invoked",
+      label: "OpenCode subagent invoked"
+    })
+  });
+  assert.equal(missingRun.code, 1);
+  assert.match(JSON.parse(missingRun.stdout).message, /Run "missing-run" was not found/);
+
+  const invalidKind = await runCli(["driver", "record-event", runId], cwd, {
+    input: JSON.stringify({
+      kind: "unknown_event",
+      label: "Unknown event"
+    })
+  });
+  assert.equal(invalidKind.code, 1);
+  assert.match(JSON.parse(invalidKind.stdout).message, /kind/);
+
+  const invalidStage = await runCli(["driver", "record-event", runId], cwd, {
+    input: JSON.stringify({
+      stage_id: "missing_stage",
+      kind: "agent_invoked",
+      label: "OpenCode subagent invoked"
+    })
+  });
+  assert.equal(invalidStage.code, 1);
+  assert.match(JSON.parse(invalidStage.stdout).message, /does not contain stage "missing_stage"/);
+
+  const mismatchedRun = await runCli(["driver", "record-event", runId], cwd, {
+    input: JSON.stringify({
+      schema_version: 1,
+      run_id: "other-run",
+      kind: "agent_invoked",
+      label: "OpenCode subagent invoked"
+    })
+  });
+  assert.equal(mismatchedRun.code, 1);
+  assert.match(JSON.parse(mismatchedRun.stdout).message, /run_id must match/);
+
+  for (const unsupportedField of ["actor", "source", "metadata"]) {
+    const unsupported = await runCli(["driver", "record-event", runId], cwd, {
+      input: JSON.stringify({
+        kind: "agent_invoked",
+        label: "OpenCode subagent invoked",
+        [unsupportedField]: {}
+      })
+    });
+    assert.equal(unsupported.code, 1);
+    assert.match(JSON.parse(unsupported.stdout).message, /Unsupported Run Trace event field/);
+  }
 });
 
 test("driver protocol invalidates stale stages after a repaired stage reports changed files or artifacts", async () => {

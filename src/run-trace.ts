@@ -37,6 +37,18 @@ export type RunTraceEventInput = Omit<RunTraceEvent, "schema_version" | "run_id"
   at?: string;
 };
 
+const SUBMITTED_RUN_TRACE_EVENT_FIELDS = new Set([
+  "schema_version",
+  "run_id",
+  "stage_id",
+  "kind",
+  "status",
+  "label",
+  "summary",
+  "at",
+  "paths"
+]);
+
 const RUN_TRACE_EVENT_KINDS = new Set<RunTraceEventKind>([
   "run_started",
   "run_resumed",
@@ -51,6 +63,12 @@ const RUN_TRACE_EVENT_KINDS = new Set<RunTraceEventKind>([
   "stage_failed",
   "run_completed",
   "run_failed"
+]);
+
+const DRIVER_PLATFORM_EVENT_KINDS = new Set<RunTraceEventKind>([
+  "agent_invoked",
+  "command_completed",
+  "artifact_written"
 ]);
 
 export async function appendRunTraceEvent(
@@ -73,6 +91,84 @@ export async function appendRunTraceEvent(
   const filePath = runTracePath(projectRoot, runState.id);
   await mkdir(path.dirname(filePath), { recursive: true });
   await appendFile(filePath, `${JSON.stringify(traceEvent)}\n`, "utf8");
+  return traceEvent;
+}
+
+export function parseSubmittedRunTraceEvent(source: string, expectedRunId: string): RunTraceEventInput {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new AgentMatrixError(`Run Trace event body is invalid JSON: ${detail}`);
+  }
+
+  if (!isJsonRecord(parsed)) {
+    throw new AgentMatrixError("Run Trace event body must be a JSON object.");
+  }
+
+  for (const fieldName of Object.keys(parsed)) {
+    if (!SUBMITTED_RUN_TRACE_EVENT_FIELDS.has(fieldName)) {
+      throw new AgentMatrixError(`Unsupported Run Trace event field "${fieldName}".`);
+    }
+  }
+
+  if (parsed.schema_version !== undefined && parsed.schema_version !== 1) {
+    throw new AgentMatrixError("Run Trace event schema_version must be 1.");
+  }
+
+  if (parsed.run_id !== undefined) {
+    if (typeof parsed.run_id !== "string" || parsed.run_id.trim().length === 0) {
+      throw new AgentMatrixError("Run Trace event run_id must be a non-empty string.");
+    }
+    if (parsed.run_id !== expectedRunId) {
+      throw new AgentMatrixError(`Run Trace event run_id must match positional run id "${expectedRunId}".`);
+    }
+  }
+
+  if (typeof parsed.kind !== "string" || !RUN_TRACE_EVENT_KINDS.has(parsed.kind as RunTraceEventKind)) {
+    throw new AgentMatrixError("Run Trace event kind is invalid.");
+  }
+
+  if (!DRIVER_PLATFORM_EVENT_KINDS.has(parsed.kind as RunTraceEventKind)) {
+    throw new AgentMatrixError(
+      "Driver record-event only accepts platform summary kinds: agent_invoked, command_completed, artifact_written."
+    );
+  }
+
+  if (typeof parsed.label !== "string" || parsed.label.trim().length === 0) {
+    throw new AgentMatrixError("Run Trace event label must be a non-empty string.");
+  }
+
+  if (!optionalString(parsed.stage_id) || parsed.stage_id === "") {
+    throw new AgentMatrixError("Run Trace event stage_id must be a non-empty string when present.");
+  }
+
+  if (!optionalString(parsed.status) || parsed.status === "") {
+    throw new AgentMatrixError("Run Trace event status must be a non-empty string when present.");
+  }
+
+  if (!optionalString(parsed.summary) || parsed.summary === "") {
+    throw new AgentMatrixError("Run Trace event summary must be a non-empty string when present.");
+  }
+
+  if (!optionalString(parsed.at) || parsed.at === "") {
+    throw new AgentMatrixError("Run Trace event at must be a non-empty string when present.");
+  }
+
+  if (!optionalStringMap(parsed.paths)) {
+    throw new AgentMatrixError("Run Trace event paths must be an object with string values when present.");
+  }
+
+  return {
+    kind: parsed.kind as RunTraceEventKind,
+    label: parsed.label,
+    ...(parsed.stage_id ? { stage_id: parsed.stage_id } : {}),
+    ...(parsed.status ? { status: parsed.status } : {}),
+    ...(parsed.summary ? { summary: parsed.summary } : {}),
+    ...(parsed.at ? { at: parsed.at } : {}),
+    ...(parsed.paths ? { paths: parsed.paths as Record<string, string> } : {})
+  };
 }
 
 export async function readRunTrace(projectRoot: string, runId: string): Promise<RunTraceEvent[]> {
@@ -115,23 +211,26 @@ function parseRunTraceEvent(line: string, filePath: string, lineNumber: number):
 }
 
 function isRunTraceEvent(value: unknown): value is RunTraceEvent {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (!isJsonRecord(value)) {
     return false;
   }
 
-  const record = value as Record<string, unknown>;
   return (
-    record.schema_version === 1 &&
-    typeof record.run_id === "string" &&
-    typeof record.kind === "string" &&
-    RUN_TRACE_EVENT_KINDS.has(record.kind as RunTraceEventKind) &&
-    typeof record.label === "string" &&
-    typeof record.at === "string" &&
-    optionalString(record.stage_id) &&
-    optionalString(record.status) &&
-    optionalString(record.summary) &&
-    optionalStringMap(record.paths)
+    value.schema_version === 1 &&
+    typeof value.run_id === "string" &&
+    typeof value.kind === "string" &&
+    RUN_TRACE_EVENT_KINDS.has(value.kind as RunTraceEventKind) &&
+    typeof value.label === "string" &&
+    typeof value.at === "string" &&
+    optionalString(value.stage_id) &&
+    optionalString(value.status) &&
+    optionalString(value.summary) &&
+    optionalStringMap(value.paths)
   );
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function optionalString(value: unknown) {

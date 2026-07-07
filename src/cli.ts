@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { text as readStreamText } from "node:stream/consumers";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { AgentMatrixError, CliUsageError } from "./errors.js";
@@ -24,6 +25,7 @@ import {
   readRunForDisplay,
   readRuns,
   readWorkflowForDisplay,
+  recordDriverTraceEvent,
   resumeDriverRun,
   resumeRun,
   startDriverRun,
@@ -146,6 +148,7 @@ Usage:
   agentmatrix [--project <dir>] driver validate-executor <run-id> --stage <stage-id>
   agentmatrix [--project <dir>] driver prepare-verifier <run-id> --stage <stage-id>
   agentmatrix [--project <dir>] driver complete-stage <run-id> --stage <stage-id>
+  agentmatrix [--project <dir>] driver record-event <run-id> < event.json
 `,
   status: `agentmatrix status
 
@@ -311,6 +314,11 @@ async function handleDriver(projectRoot: string, args: string[], io: CliIo) {
     case "complete-stage": {
       const { runId, stageId } = parseDriverStageArgs(commandArgs, "complete-stage");
       result = await completeDriverStage(projectRoot, runId, stageId);
+      break;
+    }
+    case "record-event": {
+      const runId = parseRequiredPositional(commandArgs, "driver record-event", "run-id");
+      result = await recordDriverTraceEvent(projectRoot, runId, await readDriverEventBody());
       break;
     }
     default:
@@ -488,6 +496,18 @@ function parseOptionalPositional(args: string[], command: string, name: string) 
   }
 
   return args[0];
+}
+
+function parseRequiredPositional(args: string[], command: string, name: string) {
+  const positional = parseOptionalPositional(args, command, name);
+  if (!positional) {
+    throw new CliUsageError(`Command "${command}" requires exactly one ${name}.`);
+  }
+  return positional;
+}
+
+async function readDriverEventBody() {
+  return readStreamText(process.stdin);
 }
 
 function parseExecutionArgs(args: string[], command: string, name: string, io: CliIo) {

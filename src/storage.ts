@@ -17,7 +17,7 @@ import {
   type PlatformKind,
   type PlatformTemplateInstallResult
 } from "./opencode-platform.js";
-import { appendRunTraceEvent } from "./run-trace.js";
+import { appendRunTraceEvent, parseSubmittedRunTraceEvent } from "./run-trace.js";
 import {
   DEFAULT_WORKFLOW_FILE,
   DEFAULT_WORKFLOW_ID,
@@ -525,6 +525,23 @@ export async function completeDriverStage(projectRoot: string, runId: string, st
     stage_id: stage.id,
     stage_status: stage.status,
     verifier_evidence_path: verifierEvidencePath
+  };
+}
+
+export async function recordDriverTraceEvent(projectRoot: string, runId: string, eventBody: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = await readRun(paths.projectRoot, runId);
+  const event = parseSubmittedRunTraceEvent(eventBody, runState.id);
+
+  if (event.stage_id) {
+    requireRunStage(runState, event.stage_id);
+  }
+
+  const recordedEvent = await appendRunTraceEvent(paths.projectRoot, runState, event);
+
+  return {
+    ...driverRunResult(runState, runState.status, nextDriverAction(runState)),
+    recorded_event: recordedEvent
   };
 }
 

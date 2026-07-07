@@ -646,10 +646,11 @@ function driverStageInvocation(
   const stageReportPath = stageReportArtifactPath(runState, stage);
   const executorEvidencePath = artifactPath(runState, stage.id, "executor-evidence.json");
   const verifierEvidencePath = artifactPath(runState, stage.id, "verifier-evidence.json");
+  const stageLogPaths = driverStageLogPaths(runState, stage);
   const context =
     invocationKind === "executor"
-      ? driverStageExecutionSpec(runState, stage, stageReportPath, executorEvidencePath, changeScope)
-      : driverStageVerificationSpec(runState, stage, stageReportPath, verifierEvidencePath, changeScope);
+      ? driverStageExecutionSpec(runState, stage, stageReportPath, executorEvidencePath, stageLogPaths, changeScope)
+      : driverStageVerificationSpec(runState, stage, stageReportPath, verifierEvidencePath, stageLogPaths, changeScope);
 
   return {
     schema_version: 1,
@@ -664,6 +665,7 @@ function driverStageInvocation(
     stage_report_path: stageReportPath,
     executor_evidence_path: executorEvidencePath,
     verifier_evidence_path: verifierEvidencePath,
+    stage_log_paths: stageLogPaths,
     expected_output_paths: outputSpecs(runState.artifactPath, stage.outputs),
     expected_evidence_paths:
       invocationKind === "executor" ? [executorEvidencePath] : [verifierEvidencePath],
@@ -681,6 +683,7 @@ function driverStageExecutionSpec(
   stage: RunStageState,
   stageReportPath: string,
   executorEvidencePath: string,
+  stageLogPaths: ReturnType<typeof driverStageLogPaths>,
   changeScope: ChangeScope
 ) {
   return {
@@ -692,6 +695,7 @@ function driverStageExecutionSpec(
     stage: stageSpec(stage),
     stage_report_path: stageReportPath,
     executor_evidence_path: executorEvidencePath,
+    stage_log_paths: stageLogPaths,
     outputs: outputSpecs(runState.artifactPath, stage.outputs),
     inputs: stage.inputs,
     completion_criteria: stage.completionCriteria,
@@ -710,6 +714,7 @@ function driverStageVerificationSpec(
   stage: RunStageState,
   stageReportPath: string,
   verifierEvidencePath: string,
+  stageLogPaths: ReturnType<typeof driverStageLogPaths>,
   changeScope: ChangeScope
 ) {
   return {
@@ -721,6 +726,7 @@ function driverStageVerificationSpec(
     stage: stageSpec(stage),
     stage_report_path: stageReportPath,
     verifier_evidence_path: verifierEvidencePath,
+    stage_log_paths: stageLogPaths,
     outputs: outputSpecs(runState.artifactPath, stage.outputs),
     completion_criteria: stage.completionCriteria,
     change_scope: changeScope
@@ -865,6 +871,14 @@ function outputSpecs(artifactPath: string, outputs: RunStageState["outputs"]) {
     required: output.required,
     ...(output.schema ? { schema: output.schema } : {})
   }));
+}
+
+function driverStageLogPaths(runState: RunState, stage: RunStageState) {
+  return {
+    executor_log_path: normalizeWorkflowPath(artifactPath(runState, stage.id, "executor.log")),
+    verifier_log_path: normalizeWorkflowPath(artifactPath(runState, stage.id, "verifier.log")),
+    child_subagent_log_dir: normalizeWorkflowPath(path.join(runState.artifactPath, stage.id, "subagents"))
+  };
 }
 
 function driverRunResult(

@@ -440,6 +440,13 @@ test("init --platform opencode creates a primary driver and stage subagent templ
   assert.match(driver, /agentmatrix driver record-event/);
   assert.match(driver, /core records deterministic Run Trace boundaries automatically/);
   assert.match(driver, /Record only compact platform summaries/);
+  assert.match(driver, /executor subagent invocation/);
+  assert.match(driver, /verifier subagent invocation/);
+  assert.match(driver, /checker shard count/);
+  assert.match(driver, /notable command summaries/);
+  assert.match(driver, /executor\.log/);
+  assert.match(driver, /verifier\.log/);
+  assert.match(driver, /subagents/);
   assert.match(driver, /Automatically continue through successful stages/);
   assert.match(driver, /Stop on failures, blockers, verifier rejection, or explicit user request/);
   assert.match(driver, /Do not duplicate workflow logic/);
@@ -641,6 +648,11 @@ test("driver protocol starts an interactive run and prepares the static_check ex
   assert.deepEqual(prepared.stage_invocation.expected_evidence_paths, [
     path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "executor-evidence.json")
   ]);
+  assert.deepEqual(prepared.stage_invocation.stage_log_paths, {
+    executor_log_path: path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "executor.log"),
+    verifier_log_path: path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "verifier.log"),
+    child_subagent_log_dir: path.join(".agentmatrix", "artifacts", started.run_id, "static_check", "subagents")
+  });
   assert.deepEqual(prepared.stage_invocation.required_skill_paths, [
     ".agentmatrix/skills/static-check/SKILL.md"
   ]);
@@ -668,6 +680,7 @@ test("driver protocol starts an interactive run and prepares the static_check ex
   assert.deepEqual(prepared.stage_invocation.context.required_skill_paths, [
     ".agentmatrix/skills/static-check/SKILL.md"
   ]);
+  assert.deepEqual(prepared.stage_invocation.context.stage_log_paths, prepared.stage_invocation.stage_log_paths);
   assert.equal(prepared.stage_invocation.change_scope.status, "unknown");
   assert.equal(prepared.stage_invocation.change_scope.reason, "Project is not inside a git work tree.");
   assert.deepEqual(prepared.stage_invocation.change_scope.files, []);
@@ -1093,10 +1106,10 @@ test("driver record-event appends platform summaries and run detail HTML renders
     stage_id: "static_check",
     kind: "agent_invoked",
     status: "running",
-    label: "OpenCode subagent invoked",
+    label: "OpenCode executor subagent invoked",
     summary: "Primary driver invoked the static_check OpenCode subagent.",
     paths: {
-      log_path: path.join(".agentmatrix", "artifacts", runId, "static_check", "executor.log")
+      executor_log_path: invocation.stage_log_paths.executor_log_path
     }
   };
   const recordedAgent = JSON.parse(
@@ -1134,17 +1147,63 @@ test("driver record-event appends platform summaries and run detail HTML renders
   );
   assert.equal(recordedCommand.recorded_event.at, commandAt);
 
+  const verifierEvent = {
+    stage_id: "static_check",
+    kind: "agent_invoked",
+    status: "success",
+    label: "OpenCode verifier subagent invoked",
+    summary: "Primary driver invoked the static_check_verifier OpenCode subagent.",
+    paths: {
+      verifier_log_path: invocation.stage_log_paths.verifier_log_path
+    }
+  };
+  assert.equal(
+    JSON.parse(
+      (
+        await runCli(["driver", "record-event", runId], cwd, {
+          input: JSON.stringify(verifierEvent)
+        })
+      ).stdout
+    ).recorded_event.kind,
+    "agent_invoked"
+  );
+
+  const childSubagentLogPath = path.join(invocation.stage_log_paths.child_subagent_log_dir, "checker-1.log");
+  const shardEvent = {
+    stage_id: "static_check",
+    kind: "command_completed",
+    status: "success",
+    label: "Checker shard 1 completed",
+    summary: "Checker shard count: 1.",
+    paths: {
+      child_subagent_log_path: childSubagentLogPath
+    }
+  };
+  assert.equal(
+    JSON.parse(
+      (
+        await runCli(["driver", "record-event", runId], cwd, {
+          input: JSON.stringify(shardEvent)
+        })
+      ).stdout
+    ).recorded_event.kind,
+    "command_completed"
+  );
+
   const tracePath = path.join(cwd, ".agentmatrix", "runs", runId, "trace.jsonl");
   const trace = await readJsonLines(tracePath);
   assert.deepEqual(
     trace.map((event) => event.kind),
-    ["run_started", "stage_prepared", "agent_invoked", "command_completed"]
+    ["run_started", "stage_prepared", "agent_invoked", "command_completed", "agent_invoked", "command_completed"]
   );
-  assert.deepEqual(trace.at(-2), recordedAgent.recorded_event);
-  assert.deepEqual(trace.at(-1), recordedCommand.recorded_event);
+  assert.deepEqual(trace[2], recordedAgent.recorded_event);
+  assert.deepEqual(trace[3], recordedCommand.recorded_event);
 
   await writeDriverStageReport(cwd, invocation);
   await writeDriverExecutorEvidence(cwd, invocation);
+  await writeProjectText(cwd, invocation.stage_log_paths.executor_log_path, "FULL EXECUTOR LOG CONTENT\n");
+  await writeProjectText(cwd, invocation.stage_log_paths.verifier_log_path, "FULL VERIFIER LOG CONTENT\n");
+  await writeProjectText(cwd, childSubagentLogPath, "FULL CHILD SUBAGENT LOG CONTENT\n");
   assert.equal((await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd)).code, 0);
 
   const stdout = [];
@@ -1179,12 +1238,19 @@ test("driver record-event appends platform summaries and run detail HTML renders
   const html = await readFile(path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`), "utf8");
   assert.match(html, /Agent Invoked/);
   assert.match(html, /Command Completed/);
-  assert.match(html, /OpenCode subagent invoked/);
+  assert.match(html, /OpenCode executor subagent invoked/);
+  assert.match(html, /OpenCode verifier subagent invoked/);
+  assert.match(html, /Checker shard 1 completed/);
   assert.match(html, /Primary driver invoked the static_check OpenCode subagent/);
   assert.match(html, /npm run lint/);
   assert.match(html, /Lint completed without embedding stdout/);
   assert.doesNotMatch(html, /stdout:/);
   assert.match(html, /executor\.log/);
+  assert.match(html, /verifier\.log/);
+  assert.match(html, /subagents\/checker-1\.log/);
+  assert.doesNotMatch(html, /FULL EXECUTOR LOG CONTENT/);
+  assert.doesNotMatch(html, /FULL VERIFIER LOG CONTENT/);
+  assert.doesNotMatch(html, /FULL CHILD SUBAGENT LOG CONTENT/);
 });
 
 test("driver record-event rejects malformed and invalid platform summary events", async () => {

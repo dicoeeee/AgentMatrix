@@ -50,7 +50,7 @@ node dist/cli.js driver record-event <run-id> < event.json
 
 Each protocol command writes machine-readable JSON. AgentMatrix core remains authoritative for run state, dependency checks, completion criteria, verifier results, rerun invalidation, and resume semantics. The OpenCode driver invokes subagents from Stage Invocation JSON and defaults to continuing through successful stages while stopping on failures, blockers, verifier rejection, or explicit user request.
 
-AgentMatrix core records deterministic Run Trace milestones automatically. The OpenCode primary driver uses `driver record-event` only for compact platform summaries that core cannot know directly, such as subagent invocation, checker shard summaries, notable command summaries, or Stage Log links.
+AgentMatrix core records deterministic Run Trace milestones automatically. The OpenCode primary driver uses `driver record-event` only for compact platform summaries that core cannot know directly, such as executor or verifier subagent invocation, checker shard summaries, notable command summaries, or Stage Log links. Stage Invocation JSON exposes Stage Log conventions as `stage_log_paths`: `executor_log_path`, `verifier_log_path`, and `child_subagent_log_dir`.
 
 `driver start`, `driver resume`, `driver status`, and `driver next` are safe inspection/tracer commands: they do not execute platform agents. `driver next` returns the current next-stage summary plus an executor Stage Invocation skeleton with role names, expected artifact paths, evidence paths, and prompt context. Driver Protocol failures return a `driver_protocol_error` JSON object with a stable `exit_code`.
 

@@ -12,6 +12,30 @@ _Avoid_: Script, command list
 A single execution of a workflow, with its own state, events, evidence, and artifacts.
 _Avoid_: Session
 
+**Run Driver**:
+The user-facing controller that advances a run through workflow stages while AgentMatrix remains authoritative for run state, evidence, and verification.
+_Avoid_: CLI runner, session driver
+
+**Driver Protocol**:
+The deterministic command contract a run driver uses to inspect and advance a run without owning workflow state-machine decisions.
+_Avoid_: Agent API, orchestration API
+
+**Stage Invocation**:
+A driver-facing instruction packet that names the workflow stage, the platform role to invoke, the prompt/context to pass, and the evidence paths AgentMatrix expects afterward.
+_Avoid_: Prompt, command wrapper
+
+**Change Scope**:
+The set of files and diff context a run is expected to validate for MR readiness.
+_Avoid_: Whole project, workspace scan
+
+**Change Coverage**:
+Evidence that every file in a change scope is accounted for by executed checks, skipped checks, or unsupported-analysis reasons.
+_Avoid_: Sampled check, partial scan
+
+**Check Shard**:
+A subset of a large change scope assigned to one checker subagent for focused static analysis.
+_Avoid_: Random sample, partial coverage
+
 **Runtime Adapter**:
 A platform integration that turns a workflow stage into execution by a concrete agent system while preserving AgentMatrix workflow semantics.
 _Avoid_: Backend, executor

@@ -15,11 +15,19 @@ import {
 import type { PlatformKind } from "./opencode-platform.js";
 import {
   createRun,
+  completeDriverStage,
+  prepareDriverExecutor,
+  prepareDriverVerifier,
   initializeProject,
+  readDriverNextStage,
+  readDriverStatus,
   readRunForDisplay,
   readRuns,
   readWorkflowForDisplay,
-  resumeRun
+  resumeDriverRun,
+  resumeRun,
+  startDriverRun,
+  validateDriverExecutorOutput
 } from "./storage.js";
 import { BUILT_IN_WORKFLOW_IDS, DEFAULT_WORKFLOW_ID, isBuiltInWorkflowId } from "./templates.js";
 import { AGENTMATRIX_DIR, type RunState, type RunStageState, type StageFailureMetadata } from "./types.js";
@@ -66,6 +74,7 @@ Commands:
   init                 Create the project-local AgentMatrix skeleton
   run [workflow]        Start a fresh workflow run
   resume [run-id]       Continue an existing run
+  driver <verb>         JSON Driver Protocol for interactive run drivers
   status [--json]       Show current and past run states
   visualize [run-id]    Render a workflow or run as Mermaid or JSON
 
@@ -122,6 +131,20 @@ Runtime options:
   --opencode-attach <url>   Attach to a running opencode serve instance
   --opencode-auto           Pass --auto to opencode run
 `,
+  driver: `agentmatrix driver
+
+Use the deterministic JSON Driver Protocol for interactive run drivers.
+
+Usage:
+  agentmatrix [--project <dir>] driver start [workflow]
+  agentmatrix [--project <dir>] driver resume [run-id]
+  agentmatrix [--project <dir>] driver status [run-id]
+  agentmatrix [--project <dir>] driver next [run-id]
+  agentmatrix [--project <dir>] driver prepare-executor [run-id]
+  agentmatrix [--project <dir>] driver validate-executor <run-id> --stage <stage-id>
+  agentmatrix [--project <dir>] driver prepare-verifier <run-id> --stage <stage-id>
+  agentmatrix [--project <dir>] driver complete-stage <run-id> --stage <stage-id>
+`,
   status: `agentmatrix status
 
 Show current and past run states.
@@ -173,6 +196,9 @@ export async function runCli(argv: string[], io: CliIo = process): Promise<numbe
         return 0;
       case "resume":
         await handleResume(projectRoot, commandArgs, io);
+        return 0;
+      case "driver":
+        await handleDriver(projectRoot, commandArgs, io);
         return 0;
       case "status":
         await handleStatus(projectRoot, commandArgs, io);
@@ -229,6 +255,63 @@ async function handleResume(projectRoot: string, args: string[], io: CliIo) {
   if (runState.status === "success") {
     io.stdout.write(`Completed run ${runState.id}\n`);
   }
+}
+
+async function handleDriver(projectRoot: string, args: string[], io: CliIo) {
+  const verb = args[0];
+  if (!verb) {
+    throw new CliUsageError('Command "driver" requires a protocol verb.');
+  }
+
+  const commandArgs = args.slice(1);
+  let result: unknown;
+
+  switch (verb) {
+    case "start": {
+      const workflowId = parseOptionalPositional(commandArgs, "driver start", "workflow");
+      result = await startDriverRun(projectRoot, workflowId);
+      break;
+    }
+    case "resume": {
+      const runId = parseOptionalPositional(commandArgs, "driver resume", "run-id");
+      result = await resumeDriverRun(projectRoot, runId);
+      break;
+    }
+    case "status": {
+      const runId = parseOptionalPositional(commandArgs, "driver status", "run-id");
+      result = await readDriverStatus(projectRoot, runId);
+      break;
+    }
+    case "next": {
+      const runId = parseOptionalPositional(commandArgs, "driver next", "run-id");
+      result = await readDriverNextStage(projectRoot, runId);
+      break;
+    }
+    case "prepare-executor": {
+      const runId = parseOptionalPositional(commandArgs, "driver prepare-executor", "run-id");
+      result = await prepareDriverExecutor(projectRoot, runId);
+      break;
+    }
+    case "validate-executor": {
+      const { runId, stageId } = parseDriverStageArgs(commandArgs, "validate-executor");
+      result = await validateDriverExecutorOutput(projectRoot, runId, stageId);
+      break;
+    }
+    case "prepare-verifier": {
+      const { runId, stageId } = parseDriverStageArgs(commandArgs, "prepare-verifier");
+      result = await prepareDriverVerifier(projectRoot, runId, stageId);
+      break;
+    }
+    case "complete-stage": {
+      const { runId, stageId } = parseDriverStageArgs(commandArgs, "complete-stage");
+      result = await completeDriverStage(projectRoot, runId, stageId);
+      break;
+    }
+    default:
+      throw new CliUsageError(`Unknown driver verb "${verb}". Run \`agentmatrix driver --help\` for usage.`);
+  }
+
+  io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 async function handleStatus(projectRoot: string, args: string[], io: CliIo) {
@@ -496,6 +579,42 @@ function parseExecutionArgs(args: string[], command: string, name: string, io: C
     positional: positionals[0],
     runtimeAdapter:
       runtime === "opencode" ? createOpencodeRuntimeAdapter(opencodeOptions) : createMockRuntimeAdapter()
+  };
+}
+
+function parseDriverStageArgs(args: string[], verb: string) {
+  let stageId: string | undefined;
+  const positionals: string[] = [];
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+
+    if (token === "--stage") {
+      stageId = readOptionValue(args, index, "--stage");
+      index += 1;
+      continue;
+    }
+
+    if (token.startsWith("--stage=")) {
+      stageId = readInlineOptionValue(token, "--stage");
+      continue;
+    }
+
+    rejectOptionToken(token, `driver ${verb}`);
+    positionals.push(token);
+  }
+
+  if (positionals.length !== 1) {
+    throw new CliUsageError(`Command "driver ${verb}" requires exactly one run-id.`);
+  }
+
+  if (!stageId) {
+    throw new CliUsageError(`Command "driver ${verb}" requires --stage <stage-id>.`);
+  }
+
+  return {
+    runId: positionals[0],
+    stageId
   };
 }
 

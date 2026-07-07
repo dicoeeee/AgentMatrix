@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { computeChangeScope, type ChangeScope } from "./change-scope.js";
 import { AgentMatrixError } from "./errors.js";
 import {
   assertWorkflowResourcesAvailable,
@@ -35,7 +36,8 @@ import {
 } from "./types.js";
 import {
   installWorkflowSkillTemplates,
-  type SkillTemplateInstallResult
+  type SkillTemplateInstallResult,
+  workflowSkillTemplateRelativePath
 } from "./workflow-resource-templates.js";
 import {
   failedCommand,
@@ -50,6 +52,7 @@ import { parseWorkflow } from "./workflow.js";
 
 const CONFIG_FILE = "config.json";
 const RUN_STATE_FILE = "run.json";
+const CHANGE_SCOPE_FILE = "change-scope.json";
 
 export interface InitResult {
   projectRoot: string;
@@ -114,7 +117,10 @@ export async function initializeProject(
       : undefined;
 
   if (options.platform) {
-    await mergeProjectConfigResources(paths.configPath, availableResourcesFromWorkflow(initializedWorkflow));
+    await mergeProjectConfigResources(
+      paths.configPath,
+      availableResourcesFromWorkflow(initializedWorkflow, { includeAgentMatrixManagedExecutors: true })
+    );
   }
 
   return {
@@ -139,50 +145,7 @@ export async function createRun(
   }
   await options.runtimeAdapter.validateProject?.(paths.projectRoot, workflow);
 
-  const runId = createRunId();
-  const runDir = path.join(paths.runsDir, runId);
-  const artifactDir = path.join(paths.artifactsDir, runId);
-  const now = new Date().toISOString();
-
-  await mkdir(runDir, { recursive: true });
-  await mkdir(artifactDir, { recursive: true });
-
-  const runState: RunState = {
-    schemaVersion: 1,
-    id: runId,
-    workflowId: workflow.id,
-    status: "pending",
-    createdAt: now,
-    updatedAt: now,
-    workflowPath: toProjectRelative(paths.projectRoot, workflowPath(paths.projectRoot, workflow.id)),
-    artifactPath: toProjectRelative(paths.projectRoot, artifactDir),
-    stages: workflow.stages.map((stage) => ({
-      id: stage.id,
-      name: stage.name,
-      status: "pending",
-      dependsOn: stage.dependsOn,
-      inputs: stage.inputs,
-      outputs: stage.outputs,
-      completionCriteria: stage.completionCriteria,
-      repairPolicy: stage.repairPolicy,
-      rerunWhen: stage.rerunWhen,
-      mcpResources: stage.mcpResources,
-      agentRole: stage.agentRole,
-      verifierRole: stage.verifierRole,
-      skills: stage.skills,
-      evidence: [],
-      artifacts: []
-    })),
-    events: [
-      {
-        at: now,
-        type: "run_created",
-        message: "Run created by agentmatrix run."
-      }
-    ]
-  };
-
-  await writeRun(paths.projectRoot, runState);
+  const runState = await createPendingRunState(paths.projectRoot, workflow, "Run created by agentmatrix run.");
   return executeFreshRun(paths.projectRoot, runState, options.runtimeAdapter);
 }
 
@@ -260,6 +223,226 @@ export async function validateWorkflowFile(projectRoot: string, workflowId = DEF
   await loadWorkflow(projectRoot, workflowId);
 }
 
+export async function startDriverRun(projectRoot: string, workflowId = DEFAULT_WORKFLOW_ID) {
+  const paths = projectPaths(projectRoot);
+  const workflow = await loadWorkflow(paths.projectRoot, workflowId);
+  await assertWorkflowResourcesAvailable(
+    workflow,
+    await loadProjectResourceProvider(paths),
+    { includeAgentMatrixManagedExecutors: true }
+  );
+
+  const runState = await createPendingRunState(
+    paths.projectRoot,
+    workflow,
+    "Run created by agentmatrix driver start."
+  );
+  updateRun(runState, "running");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "run_started",
+    message: "Interactive driver workflow run started."
+  });
+  await writeRun(paths.projectRoot, runState);
+  const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+  return driverRunResult(runState, "running", "prepare_executor", changeScope);
+}
+
+export async function resumeDriverRun(projectRoot: string, runId?: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
+  const workflow = await loadWorkflow(paths.projectRoot, runState.workflowId);
+  await assertWorkflowResourcesAvailable(
+    workflow,
+    await loadProjectResourceProvider(paths),
+    { includeAgentMatrixManagedExecutors: true }
+  );
+  assertRunResumable(runState);
+
+  updateRun(runState, "running");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "resume_requested",
+    message: "Interactive driver resume requested."
+  });
+  await writeRun(paths.projectRoot, runState);
+  const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+  return driverRunResult(runState, "running", "prepare_executor", changeScope);
+}
+
+export async function readDriverStatus(projectRoot: string, runId?: string) {
+  const runState = await readRunForDisplay(projectRoot, runId);
+  return driverRunResult(runState, runState.status, nextDriverAction(runState));
+}
+
+export async function readDriverNextStage(projectRoot: string, runId?: string) {
+  const runState = runId ? await readRun(projectRoot, runId) : await readLatestResumableRun(projectRoot);
+  return driverRunResult(runState, runState.status, nextDriverAction(runState));
+}
+
+export async function prepareDriverExecutor(projectRoot: string, runId?: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = runId ? await readRun(paths.projectRoot, runId) : await readLatestResumableRun(paths.projectRoot);
+  assertRunResumable(runState);
+  const stage = nextIncompleteStage(runState);
+  if (!stage) {
+    if (runState.status !== "success") {
+      await completeRun(paths.projectRoot, runState, "Interactive driver workflow run completed.");
+    }
+    return driverRunResult(runState, "success", "done");
+  }
+
+  assertDependenciesSuccessful(runState, stage);
+  if (stage.status !== "running") {
+    updateStage(runState, stage, "running");
+    runState.events.push({
+      at: runState.updatedAt,
+      type: "stage_started",
+      stageId: stage.id,
+      message: `Interactive driver prepared executor for stage ${stage.id}.`
+    });
+    await writeRun(paths.projectRoot, runState);
+  }
+
+  const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+  return {
+    ...driverRunResult(runState, runState.status, "invoke_subagent", changeScope),
+    stage_id: stage.id,
+    stage_invocation: driverStageInvocation(runState, stage, "executor", changeScope)
+  };
+}
+
+export async function validateDriverExecutorOutput(projectRoot: string, runId: string, stageId: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = await readRun(paths.projectRoot, runId);
+  const stage = requireRunStage(runState, stageId);
+  const stageReportPath = stageReportArtifactPath(runState, stage);
+  const executorEvidencePath = artifactPath(runState, stage.id, "executor-evidence.json");
+
+  if (!(await pathExists(path.join(paths.projectRoot, executorEvidencePath)))) {
+    return failDriverStage(paths.projectRoot, runState, stage, {
+      kind: "missing_resource",
+      message: `Stage "${stage.id}" executor evidence is missing at ${executorEvidencePath}.`,
+      metadata: {
+        path: executorEvidencePath
+      }
+    });
+  }
+
+  stage.artifacts = await existingStageOutputPaths(paths.projectRoot, runState, stage);
+  stage.evidence = [executorEvidencePath];
+  touchRun(runState);
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "stage_executor_completed",
+    stageId: stage.id,
+    message: `Interactive driver validated executor output for stage ${stage.id}.`
+  });
+  await writeRun(paths.projectRoot, runState);
+
+  let stageReport: StageReport;
+  try {
+    stageReport = await readStageReport(paths.projectRoot, stageReportPath);
+    assertStageReportMatchesRun(stageReport, runState, stage, stageReportPath);
+  } catch (error) {
+    return failDriverStage(paths.projectRoot, runState, stage, schemaFailure(error));
+  }
+
+  const completionFailure =
+    (await completionCriteriaFailure(paths.projectRoot, runState, stage, stageReport)) ??
+    (await staticCheckChangeScopeFailure(paths.projectRoot, runState, stage, stageReport)) ??
+    skippedReportFailure(stage, stageReport) ??
+    failedReportStatusFailure(stage, stageReport);
+
+  if (completionFailure) {
+    return failDriverStage(paths.projectRoot, runState, stage, completionFailure);
+  }
+
+  return {
+    ...driverRunResult(runState, runState.status, "prepare_verifier"),
+    stage_id: stage.id,
+    stage_report_path: stageReportPath,
+    executor_evidence_path: executorEvidencePath
+  };
+}
+
+export async function prepareDriverVerifier(projectRoot: string, runId: string, stageId: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = await readRun(paths.projectRoot, runId);
+  const stage = requireRunStage(runState, stageId);
+  const changeScope = await ensureRunChangeScope(paths.projectRoot, runState);
+
+  return {
+    ...driverRunResult(runState, runState.status, "invoke_subagent", changeScope),
+    stage_id: stage.id,
+    stage_invocation: driverStageInvocation(runState, stage, "verifier", changeScope)
+  };
+}
+
+export async function completeDriverStage(projectRoot: string, runId: string, stageId: string) {
+  const paths = projectPaths(projectRoot);
+  const runState = await readRun(paths.projectRoot, runId);
+  const stage = requireRunStage(runState, stageId);
+  const stageReportPath = stageReportArtifactPath(runState, stage);
+  const verifierEvidencePath = artifactPath(runState, stage.id, "verifier-evidence.json");
+  const evidence = await readVerifierEvidence(paths.projectRoot, verifierEvidencePath);
+
+  if (evidence?.accepted !== true) {
+    const failure: StageFailureMetadata = {
+      kind: "verifier_failure",
+      message: `Verifier ${stage.verifierRole} rejected stage "${stage.id}".`,
+      metadata: {
+        verifierRole: stage.verifierRole,
+        evidencePath: verifierEvidencePath
+      }
+    };
+    updateStage(runState, stage, "failed", failure);
+    updateRun(runState, "failed");
+    runState.events.push({
+      at: runState.updatedAt,
+      type: "stage_verified",
+      stageId: stage.id,
+      message: `Verifier ${stage.verifierRole} rejected stage ${stage.id}.`
+    });
+    await writeRun(paths.projectRoot, runState);
+    return driverFailureResult(runState, stage, failure, "stop");
+  }
+
+  let stageReport: StageReport;
+  try {
+    stageReport = await readStageReport(paths.projectRoot, stageReportPath);
+  } catch (error) {
+    return failDriverStage(paths.projectRoot, runState, stage, schemaFailure(error));
+  }
+
+  stage.evidence = [...new Set([...stage.evidence, verifierEvidencePath])];
+  updateStage(runState, stage, stageReport.status === "skipped" ? "skipped" : "success");
+  runState.events.push({
+    at: runState.updatedAt,
+    type: "stage_verified",
+    stageId: stage.id,
+    message: `Verifier ${stage.verifierRole} accepted stage ${stage.id}.`
+  });
+  invalidateStaleStages(
+    runState,
+    stageReport,
+    new Set(runState.stages.filter((candidate) => candidate.id !== stage.id && candidate.status === "success").map((candidate) => candidate.id))
+  );
+
+  if (!nextIncompleteStage(runState)) {
+    await completeRun(paths.projectRoot, runState, "Interactive driver workflow run completed.");
+  } else {
+    await writeRun(paths.projectRoot, runState);
+  }
+
+  return {
+    ...driverRunResult(runState, runState.status, nextDriverAction(runState)),
+    stage_id: stage.id,
+    stage_status: stage.status,
+    verifier_evidence_path: verifierEvidencePath
+  };
+}
+
 export function projectPaths(projectRoot: string) {
   const resolvedProjectRoot = path.resolve(projectRoot);
   const agentDir = path.join(resolvedProjectRoot, AGENTMATRIX_DIR);
@@ -286,6 +469,372 @@ async function loadWorkflow(projectRoot: string, workflowId: string): Promise<Wo
   }
 
   return parseWorkflow(await readFile(filePath, "utf8"), filePath);
+}
+
+async function createPendingRunState(
+  projectRoot: string,
+  workflow: WorkflowDefinition,
+  createdMessage: string
+): Promise<RunState> {
+  const paths = projectPaths(projectRoot);
+  const runId = createRunId();
+  const runDir = path.join(paths.runsDir, runId);
+  const artifactDir = path.join(paths.artifactsDir, runId);
+  const now = new Date().toISOString();
+
+  await mkdir(runDir, { recursive: true });
+  await mkdir(artifactDir, { recursive: true });
+
+  const runState: RunState = {
+    schemaVersion: 1,
+    id: runId,
+    workflowId: workflow.id,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
+    workflowPath: toProjectRelative(paths.projectRoot, workflowPath(paths.projectRoot, workflow.id)),
+    artifactPath: toProjectRelative(paths.projectRoot, artifactDir),
+    stages: workflow.stages.map((stage) => ({
+      id: stage.id,
+      name: stage.name,
+      status: "pending",
+      dependsOn: stage.dependsOn,
+      inputs: stage.inputs,
+      outputs: stage.outputs,
+      completionCriteria: stage.completionCriteria,
+      repairPolicy: stage.repairPolicy,
+      rerunWhen: stage.rerunWhen,
+      mcpResources: stage.mcpResources,
+      agentRole: stage.agentRole,
+      verifierRole: stage.verifierRole,
+      skills: stage.skills,
+      evidence: [],
+      artifacts: []
+    })),
+    events: [
+      {
+        at: now,
+        type: "run_created",
+        message: createdMessage
+      }
+    ]
+  };
+
+  await writeRun(paths.projectRoot, runState);
+  return runState;
+}
+
+async function ensureRunChangeScope(projectRoot: string, runState: RunState): Promise<ChangeScope> {
+  const filePath = path.join(projectRoot, AGENTMATRIX_DIR, "runs", runState.id, CHANGE_SCOPE_FILE);
+  if (await pathExists(filePath)) {
+    return JSON.parse(await readFile(filePath, "utf8")) as ChangeScope;
+  }
+
+  const changeScope = await computeChangeScope(projectRoot);
+  await writeFile(filePath, JSON.stringify(changeScope, null, 2) + "\n");
+  return changeScope;
+}
+
+function driverStageInvocation(
+  runState: RunState,
+  stage: RunStageState,
+  invocationKind: "executor" | "verifier",
+  changeScope: ChangeScope
+) {
+  const stageReportPath = stageReportArtifactPath(runState, stage);
+  const executorEvidencePath = artifactPath(runState, stage.id, "executor-evidence.json");
+  const verifierEvidencePath = artifactPath(runState, stage.id, "verifier-evidence.json");
+  const context =
+    invocationKind === "executor"
+      ? driverStageExecutionSpec(runState, stage, stageReportPath, executorEvidencePath, changeScope)
+      : driverStageVerificationSpec(runState, stage, stageReportPath, verifierEvidencePath, changeScope);
+
+  return {
+    schema_version: 1,
+    kind: "stage_invocation",
+    invocation_kind: invocationKind,
+    platform: "opencode",
+    platform_role: "subagent",
+    run_id: runState.id,
+    workflow_id: runState.workflowId,
+    stage_id: stage.id,
+    agent_role: invocationKind === "executor" ? stage.agentRole : stage.verifierRole,
+    stage_report_path: stageReportPath,
+    executor_evidence_path: executorEvidencePath,
+    verifier_evidence_path: verifierEvidencePath,
+    expected_output_paths: outputSpecs(runState.artifactPath, stage.outputs),
+    expected_evidence_paths:
+      invocationKind === "executor" ? [executorEvidencePath] : [verifierEvidencePath],
+    required_skill_paths: stage.skills.map((skill) => workflowSkillTemplateRelativePath(skill)),
+    change_scope: changeScope,
+    large_change: changeScope.large_change,
+    suggested_check_shards: changeScope.suggested_check_shards,
+    prompt: driverStagePrompt(invocationKind, stage, context),
+    context
+  };
+}
+
+function driverStageExecutionSpec(
+  runState: RunState,
+  stage: RunStageState,
+  stageReportPath: string,
+  executorEvidencePath: string,
+  changeScope: ChangeScope
+) {
+  return {
+    schema_version: 1,
+    kind: "stage_execution",
+    driver_protocol: "agentmatrix-json-cli",
+    run_id: runState.id,
+    workflow_id: runState.workflowId,
+    stage: stageSpec(stage),
+    stage_report_path: stageReportPath,
+    executor_evidence_path: executorEvidencePath,
+    outputs: outputSpecs(runState.artifactPath, stage.outputs),
+    inputs: stage.inputs,
+    completion_criteria: stage.completionCriteria,
+    repair_policy: stage.repairPolicy,
+    rerun_when: stage.rerunWhen,
+    required_skill_paths: stage.skills.map((skill) => workflowSkillTemplateRelativePath(skill)),
+    change_scope: changeScope,
+    large_change: changeScope.large_change,
+    suggested_check_shards: changeScope.suggested_check_shards
+  };
+}
+
+function driverStageVerificationSpec(
+  runState: RunState,
+  stage: RunStageState,
+  stageReportPath: string,
+  verifierEvidencePath: string,
+  changeScope: ChangeScope
+) {
+  return {
+    schema_version: 1,
+    kind: "stage_verification",
+    driver_protocol: "agentmatrix-json-cli",
+    run_id: runState.id,
+    workflow_id: runState.workflowId,
+    stage: stageSpec(stage),
+    stage_report_path: stageReportPath,
+    verifier_evidence_path: verifierEvidencePath,
+    outputs: outputSpecs(runState.artifactPath, stage.outputs),
+    completion_criteria: stage.completionCriteria,
+    change_scope: changeScope
+  };
+}
+
+function driverStagePrompt(
+  invocationKind: "executor" | "verifier",
+  stage: RunStageState,
+  context: Record<string, unknown>
+) {
+  const roleLine =
+    invocationKind === "executor"
+      ? `You are the OpenCode subagent executor for AgentMatrix stage "${stage.id}".`
+      : `You are the OpenCode subagent verifier for AgentMatrix stage "${stage.id}".`;
+  const instructions =
+    invocationKind === "executor"
+      ? driverExecutorInstructions(stage)
+      : [
+          "Verify the declared stage report, outputs, evidence, and completion criteria.",
+          "Do not repeat the executor workload. Validate the report shape, evidence presence, obvious scope omissions, failures, blockers, and changed-file reporting.",
+          "Write only the verifier evidence JSON at the path declared in the context.",
+          "Set accepted to true only when the stage evidence satisfies the declared criteria."
+        ];
+
+  return [
+    roleLine,
+    "",
+    ...instructions,
+    "Do not create or submit an MR/PR, push branches, assign reviewers, change labels, or watch CI.",
+    "",
+    "AGENTMATRIX_CONTEXT_JSON",
+    JSON.stringify(context, null, 2),
+    "END_AGENTMATRIX_CONTEXT_JSON"
+  ].join("\n");
+}
+
+function driverExecutorInstructions(stage: RunStageState) {
+  const instructions = [
+    "Execute exactly this workflow stage in the current project directory.",
+    "Write every required stage output declared in the context before finishing.",
+    "The stage_report output must be valid JSON matching AgentMatrix's stage_report schema.",
+    "If blocked, write a failed stage_report with blockers instead of only explaining the blocker."
+  ];
+
+  if (stage.id === "static_check") {
+    instructions.push(
+      "Use the project-local static-check skill and only the relevant language references from the invocation context.",
+      "Focus static analysis on the provided Change Scope; if the scope is unknown, state that limitation explicitly in skipped coverage or blockers.",
+      "safe mechanical repairs are limited to formatter output, lint autofix, import ordering, or project-tool-generated static fixes.",
+      "Behavior changes, public API changes, broad refactors, unsafe repairs, and out-of-scope repair needs must be reported as blockers."
+    );
+  }
+
+  return instructions;
+}
+
+function stageSpec(stage: RunStageState) {
+  return {
+    id: stage.id,
+    name: stage.name,
+    depends_on: stage.dependsOn,
+    agent_role: stage.agentRole,
+    verifier_role: stage.verifierRole,
+    skills: stage.skills,
+    mcp_resources: stage.mcpResources
+  };
+}
+
+function outputSpecs(artifactPath: string, outputs: RunStageState["outputs"]) {
+  return outputs.map((output) => ({
+    id: output.id,
+    path: normalizeWorkflowPath(path.join(artifactPath, output.path)),
+    required: output.required,
+    ...(output.schema ? { schema: output.schema } : {})
+  }));
+}
+
+function driverRunResult(
+  runState: RunState,
+  status: RunState["status"],
+  nextAction: string,
+  changeScope?: ChangeScope
+) {
+  const nextStage = nextIncompleteStage(runState);
+  return {
+    schema_version: 1,
+    kind: "driver_protocol_result",
+    run_id: runState.id,
+    workflow_id: runState.workflowId,
+    status,
+    run_status: runState.status,
+    next_action: nextAction,
+    next_stage_id: nextStage?.id,
+    summary: driverSummary(runState, nextAction, nextStage),
+    stages: runState.stages.map((stage) => ({
+      id: stage.id,
+      status: stage.status,
+      failure: stage.failure
+    })),
+    ...(changeScope ? { change_scope: changeScope } : {})
+  };
+}
+
+function driverSummary(runState: RunState, nextAction: string, nextStage: RunStageState | undefined) {
+  if (runState.status === "success") {
+    return `Run ${runState.id} completed.`;
+  }
+
+  if (!nextStage) {
+    return `Run ${runState.id} has no incomplete stages.`;
+  }
+
+  return `Run ${runState.id} is ${runState.status}; next action is ${nextAction} for stage ${nextStage.id}.`;
+}
+
+function nextDriverAction(runState: RunState) {
+  if (runState.status === "success") {
+    return "done";
+  }
+
+  const stage = nextIncompleteStage(runState);
+  if (!stage) {
+    return "done";
+  }
+
+  if (stage.status === "running" && stage.evidence.length === 0) {
+    return "validate_executor";
+  }
+
+  if (stage.status === "running" && stage.evidence.length === 1) {
+    return "prepare_verifier";
+  }
+
+  return "prepare_executor";
+}
+
+function nextIncompleteStage(runState: RunState) {
+  return runState.stages.find((candidate) => !isStageComplete(candidate));
+}
+
+function requireRunStage(runState: RunState, stageId: string) {
+  const stage = runState.stages.find((candidate) => candidate.id === stageId);
+  if (!stage) {
+    throw new AgentMatrixError(`Run "${runState.id}" does not contain stage "${stageId}".`);
+  }
+  return stage;
+}
+
+async function failDriverStage(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  failure: StageFailureMetadata
+) {
+  await failStage(projectRoot, runState, stage, failure);
+  return driverFailureResult(runState, stage, failure, "stop");
+}
+
+function driverFailureResult(
+  runState: RunState,
+  stage: RunStageState,
+  failure: StageFailureMetadata,
+  nextAction: string
+) {
+  return {
+    ...driverRunResult(runState, runState.status, nextAction),
+    stage_id: stage.id,
+    stage_status: stage.status,
+    failure
+  };
+}
+
+async function readVerifierEvidence(projectRoot: string, relativePath: string): Promise<{ accepted?: unknown } | undefined> {
+  try {
+    return JSON.parse(await readFile(path.join(projectRoot, relativePath), "utf8")) as { accepted?: unknown };
+  } catch {
+    return undefined;
+  }
+}
+
+async function staticCheckChangeScopeFailure(
+  projectRoot: string,
+  runState: RunState,
+  stage: RunStageState,
+  stageReport: StageReport
+): Promise<StageFailureMetadata | undefined> {
+  if (stage.id !== "static_check" || stageReport.changed_files.length === 0) {
+    return undefined;
+  }
+
+  const changeScope = await ensureRunChangeScope(projectRoot, runState);
+  if (changeScope.status !== "known") {
+    return undefined;
+  }
+
+  const scopeFiles = new Set(changeScope.files);
+  const outOfScope = normalizePathList(stageReport.changed_files).filter((filePath) => !scopeFiles.has(filePath));
+  if (outOfScope.length === 0) {
+    return undefined;
+  }
+
+  const blockers = stageReport.blockers ?? [];
+  const blockerMentionsOutOfScope = blockers.some((blocker) =>
+    outOfScope.some((filePath) => blocker.message.includes(filePath))
+  );
+  if (blockerMentionsOutOfScope) {
+    return undefined;
+  }
+
+  return {
+    kind: "human_required_blocker",
+    message: `Stage "${stage.id}" changed files outside the Change Scope without a blocker: ${outOfScope.join(", ")}.`,
+    metadata: {
+      outOfScopeChangedFiles: outOfScope
+    }
+  };
 }
 
 async function executeFreshRun(

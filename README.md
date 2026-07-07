@@ -19,7 +19,7 @@ Run the local command through Node:
 node dist/cli.js --help
 ```
 
-Supported MVP verbs are `init`, `run`, `resume`, `status`, and `visualize`.
+Supported MVP verbs are `init`, `run`, `resume`, `driver`, `status`, and `visualize`.
 
 `agentmatrix init --workflow mr-preflight` creates a project-local `.agentmatrix/` directory with workflow templates, workflow-declared bundled skill templates, run state, and artifact directories. It does not initialize or require git in the target project. Bundled skill templates are copied to `.agentmatrix/skills/<skill>/` when the workflow declares them, and existing local skill directories are preserved. `agentmatrix run` creates a fresh run every time and executes the built-in workflow with static-check, test-check, code-review, and MR-prepare mock adapters by default, plus mock verifier agents; `resume`, `status`, and `visualize` operate on the filesystem-backed run state. `agentmatrix visualize --workflow mr-preflight` renders the static workflow definition, while `agentmatrix visualize [run-id]` renders actual run state. Both targets support `--format mermaid|json`. Run visualizations also surface stage-internal parallel activity from stage report `parallel_group` commands and OpenCode background subagents recorded in executor evidence. Mermaid output remains on stdout; when stdout is an interactive terminal, AgentMatrix also writes `.agentmatrix/visualizations/*.html` with an enhanced browser layout and opens it in the default browser. Use `--no-open` to suppress that behavior, or `--open` to force HTML generation and browser opening when stdout is piped.
 
@@ -29,11 +29,31 @@ Use OpenCode as the runtime adapter with:
 node dist/cli.js run --runtime opencode
 ```
 
-`run` and `resume` also accept `--opencode-bin <path>`, `--opencode-model <provider/model>`, `--opencode-attach <url>`, and `--opencode-auto` when `--runtime opencode` is selected. The OpenCode adapter invokes `opencode run --agent <role> --dir <project> --format json` for platform-managed execution roles and verifier roles declared by the workflow. For the built-in `mr-preflight` `static_check` stage, AgentMatrix executes discovered static gates through its scheduler first, running read-only gates in one parallel group and serializing writer gates, then invokes the `static_check_verifier` OpenCode agent against the generated evidence. Execution agents are expected to write the declared stage outputs, including `stage_report`; verifier agents are expected to write verifier evidence with an `accepted` boolean.
+`run` and `resume` also accept `--opencode-bin <path>`, `--opencode-model <provider/model>`, `--opencode-attach <url>`, and `--opencode-auto` when `--runtime opencode` is selected. This is the non-interactive compatibility path: the OpenCode adapter invokes `opencode run --agent <role> --dir <project> --format json` for platform-managed execution roles and verifier roles declared by the workflow. For the built-in `mr-preflight` `static_check` stage, that compatibility path still executes discovered static gates through AgentMatrix's scheduler first, then invokes the `static_check_verifier` OpenCode agent against the generated evidence.
+
+For OpenCode-native interactive runs, initialize templates and start the generated primary driver agent:
+
+```sh
+node dist/cli.js init --platform opencode
+```
+
+This installs `.opencode/agents/agentmatrix_driver.md` plus workflow executor and verifier subagent templates, including `static_check.md`. The primary driver uses the JSON Driver Protocol:
+
+```sh
+node dist/cli.js driver start
+node dist/cli.js driver prepare-executor <run-id>
+node dist/cli.js driver validate-executor <run-id> --stage <stage-id>
+node dist/cli.js driver prepare-verifier <run-id> --stage <stage-id>
+node dist/cli.js driver complete-stage <run-id> --stage <stage-id>
+```
+
+Each protocol command writes machine-readable JSON. AgentMatrix core remains authoritative for run state, dependency checks, completion criteria, verifier results, rerun invalidation, and resume semantics. The OpenCode driver invokes subagents from Stage Invocation JSON and defaults to continuing through successful stages while stopping on failures, blockers, verifier rejection, or explicit user request.
+
+Driver-created Stage Invocations include a Change Scope. In git repositories the scope summarizes changed files from the default-branch merge base, staged changes, unstaged changes, and untracked files, excluding AgentMatrix runtime state. Large scopes include suggested Check Shards. Outside git repositories the scope is marked unknown so the static-check subagent can report that limitation explicitly.
 
 Pass `--verbose` to `run` or `resume` to print runtime command details. For OpenCode runs, verbose output includes each executor and verifier invocation, the redacted command, exit code, stdout, and stderr.
 
-The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction; static and test commands are discovered by, or injected into, the runtime adapter rather than stored in workflow YAML. `agentmatrix init --platform opencode` therefore installs OpenCode templates for later stage executors plus all verifiers, but intentionally does not create a `static_check` executor template for the built-in workflow.
+The copied `mr-preflight` workflow is editable YAML. Its four linear stages are `static_check`, `test_check`, `code_review`, and `mr_prepare`; each stage declares inputs, outputs, completion criteria, repair policy, rerun triggers, execution and verifier roles, and any platform-visible skills. The core workflow template does not define platform-specific agent files or a cross-platform command abstraction; static and test commands are discovered by, or injected into, the runtime adapter rather than stored in workflow YAML. `agentmatrix init --platform opencode` installs the primary OpenCode driver plus executor and verifier templates for all workflow stages.
 
 Workflow YAML is validated before run/resume paths use it. Validation errors include the workflow file location and the specific field path that needs attention.
 

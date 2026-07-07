@@ -1,7 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { usesAgentMatrixStaticCheckExecutor } from "./builtin-stage-executors.js";
 import type { WorkflowDefinition, WorkflowStage } from "./types.js";
 import { workflowSkillTemplateRelativePath } from "./workflow-resource-templates.js";
 
@@ -16,13 +15,12 @@ export interface PlatformTemplateInstallOptions {
   force?: boolean;
 }
 
-type AgentTemplateKind = "executor" | "verifier";
+type AgentTemplateKind = "driver" | "executor" | "verifier";
 
 interface AgentTemplateSpec {
   role: string;
   kind: AgentTemplateKind;
-  stage: WorkflowStage;
-  executorManagedByAgentMatrix?: boolean;
+  stage?: WorkflowStage;
 }
 
 export async function installOpencodeAgentTemplates(
@@ -60,26 +58,35 @@ export async function installOpencodeAgentTemplates(
 }
 
 function opencodeAgentTemplateSpecs(workflow: WorkflowDefinition): AgentTemplateSpec[] {
-  return workflow.stages.flatMap((stage) => [
-    ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)
-      ? []
-      : [
-          {
-            role: stage.agentRole,
-            kind: "executor" as const,
-            stage
-          }
-        ]),
+  return [
     {
-      role: stage.verifierRole,
-      kind: "verifier" as const,
-      stage,
-      executorManagedByAgentMatrix: usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)
-    }
-  ]);
+      role: "agentmatrix_driver",
+      kind: "driver" as const
+    },
+    ...workflow.stages.flatMap((stage) => [
+      {
+        role: stage.agentRole,
+        kind: "executor" as const,
+        stage
+      },
+      {
+        role: stage.verifierRole,
+        kind: "verifier" as const,
+        stage
+      }
+    ])
+  ];
 }
 
 function opencodeAgentTemplate(spec: AgentTemplateSpec) {
+  if (spec.kind === "driver") {
+    return driverTemplate();
+  }
+
+  if (!spec.stage) {
+    throw new Error(`OpenCode ${spec.kind} template for ${spec.role} is missing a workflow stage.`);
+  }
+
   const canRunShell = spec.kind === "executor";
   const title = spec.kind === "executor" ? "Executor" : "Verifier";
   const description =
@@ -116,18 +123,28 @@ function opencodeAgentTemplate(spec: AgentTemplateSpec) {
 }
 
 function executorInstructions(stage: WorkflowStage) {
-  return [
+  const instructions = [
     "Write every required stage output declared in the context before finishing.",
     "The `stage_report` output must be valid JSON matching AgentMatrix's stage_report schema.",
     `Stage skills exposed by the workflow: ${formatSkillList(stage.skills)}.`,
     `Stage MCP resources exposed by the workflow: ${formatInlineList(stage.mcpResources)}.`
   ];
+
+  if (stage.id === "static_check") {
+    instructions.push(
+      "For static_check, use `.agentmatrix/skills/static-check/SKILL.md`, focus on the Driver Protocol Change Scope, and limit repairs to safe mechanical repairs."
+    );
+  }
+
+  return instructions;
 }
 
 function verifierInstructions(spec: AgentTemplateSpec) {
-  const executorLine = spec.executorManagedByAgentMatrix
-    ? `Executor under review: AgentMatrix built-in scheduler for \`${spec.stage.id}\`.`
-    : `Executor role under review: \`${spec.stage.agentRole}\`.`;
+  if (!spec.stage) {
+    throw new Error(`OpenCode verifier template for ${spec.role} is missing a workflow stage.`);
+  }
+
+  const executorLine = `Executor role under review: \`${spec.stage.agentRole}\`.`;
 
   return [
     "Verify the declared stage report, outputs, and completion criteria.",
@@ -135,6 +152,40 @@ function verifierInstructions(spec: AgentTemplateSpec) {
     "Set `accepted` to true only when the stage evidence satisfies the declared criteria.",
     executorLine
   ];
+}
+
+function driverTemplate() {
+  return [
+    "---",
+    'description: "AgentMatrix OpenCode Run Driver"',
+    "mode: primary",
+    "tools:",
+    "  read: true",
+    "  write: true",
+    "  bash: true",
+    "---",
+    "",
+    "# AgentMatrix OpenCode Run Driver",
+    "",
+    "You are the primary OpenCode driver for AgentMatrix interactive runs.",
+    "",
+    "Keep the driver thin. AgentMatrix core owns workflow state, dependency checks, completion criteria, verifier results, rerun invalidation, and resume semantics.",
+    "",
+    "Use the deterministic JSON Driver Protocol commands from the project root:",
+    "",
+    "- `agentmatrix driver start` to create a run, or `agentmatrix driver resume [run-id]` to resume one.",
+    "- `agentmatrix driver status [run-id]` and `agentmatrix driver next [run-id]` to inspect state.",
+    "- `agentmatrix driver prepare-executor [run-id]` to receive the next executor Stage Invocation.",
+    "- Invoke the named OpenCode subagent from the Stage Invocation for executor work.",
+    "- `agentmatrix driver validate-executor <run-id> --stage <stage-id>` after executor evidence is written.",
+    "- `agentmatrix driver prepare-verifier <run-id> --stage <stage-id>` to receive verifier work.",
+    "- Invoke the named verifier subagent from the Stage Invocation.",
+    "- `agentmatrix driver complete-stage <run-id> --stage <stage-id>` after verifier evidence is written.",
+    "",
+    "Automatically continue through successful stages unless the human asks for stepwise mode. Stop on failures, blockers, verifier rejection, or explicit user request.",
+    "Do not duplicate workflow logic in this prompt; follow Driver Protocol JSON.",
+    ""
+  ].join("\n");
 }
 
 function formatInlineList(values: string[]) {

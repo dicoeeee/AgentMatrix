@@ -44,6 +44,10 @@ async function runCli(args, cwd) {
   }
 }
 
+async function git(cwd, args) {
+  return execFileAsync("git", args, { cwd });
+}
+
 async function createFakeOpencode(cwd) {
   const executable = path.join(cwd, "fake-opencode.js");
   const logPath = path.join(cwd, "opencode-calls.jsonl");
@@ -148,6 +152,18 @@ async function writeRunState(cwd, runState) {
 
 async function readProjectJson(cwd, relativePath) {
   return JSON.parse(await readFile(path.join(cwd, relativePath), "utf8"));
+}
+
+async function writeProjectJson(cwd, relativePath, data) {
+  const filePath = path.join(cwd, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, JSON.stringify(data, null, 2) + "\n");
+}
+
+async function writeProjectText(cwd, relativePath, data) {
+  const filePath = path.join(cwd, relativePath);
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, data);
 }
 
 async function readJsonLines(filePath) {
@@ -314,19 +330,32 @@ test("init --platform opencode creates templates for platform-managed mr-preflig
   const result = await runCli(["init", "--platform", "opencode"], cwd);
 
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /OpenCode agent templates: created 7, skipped 0/);
+  assert.match(result.stdout, /OpenCode agent templates: created 9, skipped 0/);
 
   const agentsDir = path.join(cwd, ".opencode", "agents");
   const entries = (await readdir(agentsDir)).sort();
   assert.deepEqual(entries, [
+    "agentmatrix_driver.md",
     "code_review.md",
     "code_review_verifier.md",
     "mr_prepare.md",
     "mr_prepare_verifier.md",
+    "static_check.md",
     "static_check_verifier.md",
     "test_check.md",
     "test_check_verifier.md"
   ]);
+
+  const driver = await readFile(path.join(agentsDir, "agentmatrix_driver.md"), "utf8");
+  assert.match(driver, /description: "AgentMatrix OpenCode Run Driver"/);
+  assert.match(driver, /mode: primary/);
+  assert.match(driver, /agentmatrix driver start/);
+  assert.match(driver, /agentmatrix driver complete-stage/);
+
+  const staticCheck = await readFile(path.join(agentsDir, "static_check.md"), "utf8");
+  assert.match(staticCheck, /description: "AgentMatrix executor for static_check"/);
+  assert.match(staticCheck, /\.agentmatrix\/skills\/static-check\/SKILL\.md/);
+  assert.match(staticCheck, /safe mechanical repairs/);
 
   const testCheck = await readFile(path.join(agentsDir, "test_check.md"), "utf8");
   assert.match(testCheck, /description: "AgentMatrix executor for test_check"/);
@@ -342,7 +371,7 @@ test("init --platform opencode creates templates for platform-managed mr-preflig
   assert.match(verifier, /write: true/);
   assert.match(verifier, /bash: false/);
   assert.match(verifier, /Write only the verifier evidence JSON/);
-  assert.match(verifier, /AgentMatrix built-in scheduler for `static_check`/);
+  assert.match(verifier, /Executor role under review: `static_check`/);
 });
 
 test("init --platform opencode is idempotent and reports skipped templates", async () => {
@@ -356,7 +385,7 @@ test("init --platform opencode is idempotent and reports skipped templates", asy
 
   assert.equal(first.code, 0, first.stderr);
   assert.equal(second.code, 0, second.stderr);
-  assert.match(second.stdout, /OpenCode agent templates: created 0, skipped 7/);
+  assert.match(second.stdout, /OpenCode agent templates: created 0, skipped 9/);
   assert.equal(secondTemplate, firstTemplate);
 });
 
@@ -374,14 +403,14 @@ test("init --platform opencode preserves existing templates unless force is pass
 
   const preserved = await runCli(["init", "--platform", "opencode"], cwd);
   assert.equal(preserved.code, 0, preserved.stderr);
-  assert.match(preserved.stdout, /OpenCode agent templates: created 0, skipped 7/);
+  assert.match(preserved.stdout, /OpenCode agent templates: created 0, skipped 9/);
   assert.equal(await readFile(templatePath, "utf8"), "custom test_check template\n");
   assert.equal(await readFile(configPath, "utf8"), initialConfig);
   assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
 
   const forced = await runCli(["init", "--platform", "opencode", "--force"], cwd);
   assert.equal(forced.code, 0, forced.stderr);
-  assert.match(forced.stdout, /OpenCode agent templates: created 7, skipped 0/);
+  assert.match(forced.stdout, /OpenCode agent templates: created 9, skipped 0/);
   assert.match(await readFile(templatePath, "utf8"), /AgentMatrix executor for test_check/);
   assert.equal(await readFile(configPath, "utf8"), initialConfig);
   assert.equal(await readFile(workflowPath, "utf8"), editedWorkflow);
@@ -470,6 +499,289 @@ test("init copies an editable mr-preflight workflow with complete stage contract
   assert.ok(config.availableResources.agents.includes("static_check_verifier"));
   assert.ok(config.availableResources.skills.includes("static-check"));
   assert.deepEqual(config.availableResources.mcpResources, []);
+});
+
+test("driver protocol starts an interactive run and prepares the static_check executor invocation", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+
+  const start = await runCli(["driver", "start"], cwd);
+  assert.equal(start.code, 0, start.stderr);
+  const started = JSON.parse(start.stdout);
+  assert.equal(started.status, "running");
+  assert.equal(started.next_stage_id, "static_check");
+  assert.equal(started.next_action, "prepare_executor");
+
+  const runState = await readRunState(cwd, started.run_id);
+  assert.equal(runState.status, "running");
+  assert.deepEqual(
+    runState.stages.map((stage) => [stage.id, stage.status]),
+    [
+      ["static_check", "pending"],
+      ["test_check", "pending"],
+      ["code_review", "pending"],
+      ["mr_prepare", "pending"]
+    ]
+  );
+
+  const prepared = JSON.parse((await runCli(["driver", "prepare-executor", started.run_id], cwd)).stdout);
+  assert.equal(prepared.next_action, "invoke_subagent");
+  assert.equal(prepared.stage_invocation.kind, "stage_invocation");
+  assert.equal(prepared.stage_invocation.invocation_kind, "executor");
+  assert.equal(prepared.stage_invocation.agent_role, "static_check");
+  assert.equal(prepared.stage_invocation.platform_role, "subagent");
+  assert.deepEqual(prepared.stage_invocation.required_skill_paths, [
+    ".agentmatrix/skills/static-check/SKILL.md"
+  ]);
+  assert.equal(prepared.stage_invocation.change_scope.status, "unknown");
+  assert.match(prepared.stage_invocation.prompt, /safe mechanical repairs/);
+  assert.match(prepared.stage_invocation.prompt, /AGENTMATRIX_CONTEXT_JSON/);
+
+  const afterPrepare = await readRunState(cwd, started.run_id);
+  assert.equal(afterPrepare.stages[0].status, "running");
+  assert.deepEqual(
+    afterPrepare.events.map((event) => [event.type, event.stageId ?? null]),
+    [
+      ["run_created", null],
+      ["run_started", null],
+      ["stage_started", "static_check"]
+    ]
+  );
+});
+
+test("driver protocol reports status, next stage, and resumable run state", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+
+  const status = JSON.parse((await runCli(["driver", "status", runId], cwd)).stdout);
+  assert.equal(status.run_status, "running");
+  assert.equal(status.next_action, "prepare_executor");
+  assert.equal(status.next_stage_id, "static_check");
+
+  const next = JSON.parse((await runCli(["driver", "next", runId], cwd)).stdout);
+  assert.equal(next.run_status, "running");
+  assert.equal(next.next_action, "prepare_executor");
+  assert.equal(next.next_stage_id, "static_check");
+
+  const resumed = JSON.parse((await runCli(["driver", "resume", runId], cwd)).stdout);
+  assert.equal(resumed.run_status, "running");
+  assert.equal(resumed.next_action, "prepare_executor");
+  assert.equal(resumed.next_stage_id, "static_check");
+
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.events.some((event) => event.type === "resume_requested"), true);
+});
+
+test("driver protocol validates executor output, prepares verifier work, and completes one stage", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const prepared = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout);
+  const invocation = prepared.stage_invocation;
+
+  await writeProjectJson(cwd, invocation.stage_report_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    status: "success",
+    summary: "Static-check subagent completed.",
+    commands: [
+      {
+        name: "Typecheck",
+        command: "npm run typecheck",
+        status: "success",
+        exit_code: 0
+      }
+    ],
+    findings: [],
+    artifacts: [invocation.stage_report_path],
+    skipped: [],
+    changed_files: [],
+    blockers: []
+  });
+  await writeProjectJson(cwd, invocation.executor_evidence_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    agent_role: "static_check",
+    status: "success",
+    summary: "Static-check subagent completed."
+  });
+
+  const validated = JSON.parse((await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(validated.next_action, "prepare_verifier");
+  assert.equal(validated.stage_id, "static_check");
+
+  const verifier = JSON.parse((await runCli(["driver", "prepare-verifier", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(verifier.stage_invocation.invocation_kind, "verifier");
+  assert.equal(verifier.stage_invocation.agent_role, "static_check_verifier");
+  assert.equal(verifier.stage_invocation.platform_role, "subagent");
+
+  await writeProjectJson(cwd, verifier.stage_invocation.verifier_evidence_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    verifier_role: "static_check_verifier",
+    accepted: true,
+    checked_artifact: invocation.stage_report_path,
+    summary: "Verifier accepted static_check."
+  });
+
+  const completed = JSON.parse((await runCli(["driver", "complete-stage", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(completed.stage_status, "success");
+  assert.equal(completed.run_status, "running");
+  assert.equal(completed.next_stage_id, "test_check");
+  assert.equal(completed.next_action, "prepare_executor");
+
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.stages[0].status, "success");
+  assert.deepEqual(runState.stages[0].artifacts, [invocation.stage_report_path]);
+  assert.deepEqual(runState.stages[0].evidence, [
+    invocation.executor_evidence_path,
+    verifier.stage_invocation.verifier_evidence_path
+  ]);
+});
+
+test("driver protocol stops when verifier evidence rejects a stage", async () => {
+  const cwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const invocation = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout).stage_invocation;
+
+  await writeProjectJson(cwd, invocation.stage_report_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    status: "success",
+    summary: "Static-check subagent completed.",
+    commands: [],
+    findings: [],
+    artifacts: [invocation.stage_report_path],
+    skipped: [],
+    changed_files: [],
+    blockers: []
+  });
+  await writeProjectJson(cwd, invocation.executor_evidence_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    agent_role: "static_check",
+    status: "success"
+  });
+
+  const validated = await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd);
+  assert.equal(validated.code, 0, validated.stderr);
+  const verifier = JSON.parse((await runCli(["driver", "prepare-verifier", runId, "--stage", "static_check"], cwd)).stdout);
+  await writeProjectJson(cwd, verifier.stage_invocation.verifier_evidence_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    verifier_role: "static_check_verifier",
+    accepted: false,
+    checked_artifact: invocation.stage_report_path,
+    summary: "Verifier rejected fixture output."
+  });
+
+  const completed = JSON.parse((await runCli(["driver", "complete-stage", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(completed.run_status, "failed");
+  assert.equal(completed.next_action, "stop");
+  assert.equal(completed.failure.kind, "verifier_failure");
+
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+  assert.equal(runState.stages[0].failure.kind, "verifier_failure");
+  assert.equal(runState.stages[1].status, "pending");
+});
+
+test("driver protocol blocks static_check repairs outside the Change Scope", async () => {
+  const cwd = await tempProject();
+  await git(cwd, ["init", "-b", "main"]);
+  await git(cwd, ["config", "user.email", "agentmatrix@example.com"]);
+  await git(cwd, ["config", "user.name", "AgentMatrix Test"]);
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  await writeProjectText(cwd, "src/in-scope.ts", "export const value = 1;\n");
+  await writeProjectText(cwd, "src/out-of-scope.ts", "export const other = 1;\n");
+  await git(cwd, ["add", "."]);
+  await git(cwd, ["commit", "-m", "baseline"]);
+  await git(cwd, ["checkout", "-b", "feature/static-repair"]);
+  await writeProjectText(cwd, "src/in-scope.ts", "export const value = 2;\n");
+
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const invocation = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout).stage_invocation;
+  assert.deepEqual(invocation.change_scope.files, ["src/in-scope.ts"]);
+
+  await writeProjectJson(cwd, invocation.stage_report_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    status: "success",
+    summary: "Static-check subagent repaired a file outside the scope.",
+    commands: [],
+    findings: [],
+    artifacts: [invocation.stage_report_path],
+    skipped: [],
+    changed_files: ["src/out-of-scope.ts"],
+    blockers: []
+  });
+  await writeProjectJson(cwd, invocation.executor_evidence_path, {
+    schema_version: 1,
+    run_id: runId,
+    stage_id: "static_check",
+    agent_role: "static_check",
+    status: "success"
+  });
+
+  const validated = JSON.parse((await runCli(["driver", "validate-executor", runId, "--stage", "static_check"], cwd)).stdout);
+  assert.equal(validated.run_status, "failed");
+  assert.equal(validated.next_action, "stop");
+  assert.equal(validated.failure.kind, "human_required_blocker");
+  assert.deepEqual(validated.failure.metadata.outOfScopeChangedFiles, ["src/out-of-scope.ts"]);
+
+  const runState = await readRunState(cwd, runId);
+  assert.equal(runState.status, "failed");
+  assert.equal(runState.stages[0].status, "failed");
+});
+
+test("driver protocol includes git change scope, large-change hints, and check shards", async () => {
+  const cwd = await tempProject();
+  await git(cwd, ["init", "-b", "main"]);
+  await git(cwd, ["config", "user.email", "agentmatrix@example.com"]);
+  await git(cwd, ["config", "user.name", "AgentMatrix Test"]);
+  assert.equal((await runCli(["init", "--platform", "opencode"], cwd)).code, 0);
+  await writeProjectText(cwd, "src/baseline.ts", "export const baseline = 1;\n");
+  await git(cwd, ["add", "."]);
+  await git(cwd, ["commit", "-m", "baseline"]);
+  await git(cwd, ["checkout", "-b", "feature/driver"]);
+
+  for (let index = 0; index < 9; index += 1) {
+    await writeProjectText(cwd, `src/change-${index}.ts`, `export const change${index} = ${index};\n`);
+  }
+
+  const runId = JSON.parse((await runCli(["driver", "start"], cwd)).stdout).run_id;
+  const prepared = JSON.parse((await runCli(["driver", "prepare-executor", runId], cwd)).stdout);
+  const scope = prepared.stage_invocation.change_scope;
+
+  assert.equal(scope.status, "known");
+  assert.equal(scope.default_branch, "main");
+  assert.equal(scope.files.length, 9);
+  assert.ok(scope.files.includes("src/change-0.ts"));
+  assert.deepEqual(scope.sources.untracked_files.sort(), [
+    "src/change-0.ts",
+    "src/change-1.ts",
+    "src/change-2.ts",
+    "src/change-3.ts",
+    "src/change-4.ts",
+    "src/change-5.ts",
+    "src/change-6.ts",
+    "src/change-7.ts",
+    "src/change-8.ts"
+  ]);
+  assert.equal(scope.large_change.is_large, true);
+  assert.match(scope.large_change.reasons.join(" "), /9 changed files/);
+  assert.ok(prepared.stage_invocation.suggested_check_shards.length > 0);
+  assert.equal(prepared.stage_invocation.suggested_check_shards[0].files.length, 9);
 });
 
 test("run always creates a fresh completed filesystem-backed run", async () => {

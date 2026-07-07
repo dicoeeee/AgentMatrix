@@ -19,13 +19,18 @@ export interface ResourceProvider {
   hasResource(resource: RequiredResource): boolean | Promise<boolean>;
 }
 
+export interface WorkflowResourceOptions {
+  includeAgentMatrixManagedExecutors?: boolean;
+}
+
 export async function assertWorkflowResourcesAvailable(
   workflow: WorkflowDefinition,
-  provider: ResourceProvider
+  provider: ResourceProvider,
+  options: WorkflowResourceOptions = {}
 ): Promise<void> {
   const missing: RequiredResource[] = [];
 
-  for (const resource of requiredResourcesForWorkflow(workflow)) {
+  for (const resource of requiredResourcesForWorkflow(workflow, options)) {
     if (!(await provider.hasResource(resource))) {
       missing.push(resource);
     }
@@ -36,11 +41,16 @@ export async function assertWorkflowResourcesAvailable(
   }
 }
 
-export function availableResourcesFromWorkflow(workflow: WorkflowDefinition): AvailableResources {
+export function availableResourcesFromWorkflow(
+  workflow: WorkflowDefinition,
+  options: WorkflowResourceOptions = {}
+): AvailableResources {
   return {
     agents: unique(
       workflow.stages.flatMap((stage) => [
-        ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id) ? [] : [stage.agentRole]),
+        ...(usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id) && !options.includeAgentMatrixManagedExecutors
+          ? []
+          : [stage.agentRole]),
         stage.verifierRole
       ])
     ),
@@ -86,11 +96,14 @@ export function mergeAvailableResources(
   };
 }
 
-function requiredResourcesForWorkflow(workflow: WorkflowDefinition): RequiredResource[] {
+function requiredResourcesForWorkflow(
+  workflow: WorkflowDefinition,
+  options: WorkflowResourceOptions
+): RequiredResource[] {
   const resources: RequiredResource[] = [];
 
   for (const stage of workflow.stages) {
-    if (!usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id)) {
+    if (!usesAgentMatrixStaticCheckExecutor(workflow.id, stage.id) || options.includeAgentMatrixManagedExecutors) {
       resources.push({ kind: "agent", id: stage.agentRole });
     }
     resources.push({ kind: "agent", id: stage.verifierRole });

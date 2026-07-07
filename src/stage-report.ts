@@ -23,6 +23,11 @@ export interface StageReportBlocker {
   resource?: string;
 }
 
+export interface StageReportOutOfScopeChange {
+  path: string;
+  reason: string;
+}
+
 export interface StageReportSkippedItem {
   id?: string;
   reason: string;
@@ -40,6 +45,7 @@ export interface StageReport {
   skipped: StageReportSkippedItem[];
   changed_files: string[];
   changed_artifacts?: string[];
+  out_of_scope_changes?: StageReportOutOfScopeChange[];
   blockers?: StageReportBlocker[];
   skip_reason?: string;
 }
@@ -162,6 +168,24 @@ const STAGE_REPORT_SCHEMA: AnySchema = {
       items: {
         type: "string",
         minLength: 1
+      }
+    },
+    out_of_scope_changes: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["path", "reason"],
+        additionalProperties: false,
+        properties: {
+          path: {
+            type: "string",
+            minLength: 1
+          },
+          reason: {
+            type: "string",
+            minLength: 1
+          }
+        }
       }
     },
     blockers: {

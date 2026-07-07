@@ -169,6 +169,10 @@ function parseRunId(stdout) {
   return match[1];
 }
 
+function escapeRegExpForAssert(value) {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
 async function readRunState(cwd, runId) {
   return JSON.parse(await readFile(path.join(cwd, ".agentmatrix", "runs", runId, "run.json"), "utf8"));
 }
@@ -194,6 +198,39 @@ async function writeProjectText(cwd, relativePath, data) {
   const filePath = path.join(cwd, relativePath);
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, data);
+}
+
+async function renderRunDetailHtml(cwd, runId) {
+  const stdout = [];
+  const stderr = [];
+  const previousDisableOpen = process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+  process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = "1";
+
+  try {
+    const code = await runCliInProcess(["--project", cwd, "visualize", runId, "--open"], {
+      stdout: {
+        write(message) {
+          stdout.push(message);
+        }
+      },
+      stderr: {
+        write(message) {
+          stderr.push(message);
+        }
+      }
+    });
+
+    assert.equal(code, 0, stderr.join(""));
+  } finally {
+    if (previousDisableOpen === undefined) {
+      delete process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN;
+    } else {
+      process.env.AGENTMATRIX_DISABLE_BROWSER_OPEN = previousDisableOpen;
+    }
+  }
+
+  assert.match(stdout.join(""), /graph TD/);
+  return readFile(path.join(cwd, ".agentmatrix", "visualizations", `run-${runId}.html`), "utf8");
 }
 
 async function writeDriverStageReport(cwd, invocation, overrides = {}) {
@@ -1094,6 +1131,173 @@ test("driver protocol records run trace milestones and visualize --open renders 
   assert.match(html, /Run Completed/);
   assert.match(html, /static_check executor passed/);
   assert.match(html, /stage-report\.json/);
+});
+
+test("driver protocol records executor validation failures in trace and failure HTML", async () => {
+  const missingExecutorCwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], missingExecutorCwd)).code, 0);
+  const missingExecutorRunId = JSON.parse((await runCli(["driver", "start"], missingExecutorCwd)).stdout).run_id;
+  const missingInvocation = JSON.parse(
+    (await runCli(["driver", "prepare-executor", missingExecutorRunId], missingExecutorCwd)).stdout
+  ).stage_invocation;
+
+  const missingResult = JSON.parse(
+    (await runCli(["driver", "validate-executor", missingExecutorRunId, "--stage", "static_check"], missingExecutorCwd)).stdout
+  );
+  assert.equal(missingResult.run_status, "failed");
+  assert.equal(missingResult.failure.kind, "missing_resource");
+
+  const missingTrace = await readJsonLines(
+    path.join(missingExecutorCwd, ".agentmatrix", "runs", missingExecutorRunId, "trace.jsonl")
+  );
+  assert.deepEqual(missingTrace.map((event) => event.kind), [
+    "run_started",
+    "stage_prepared",
+    "stage_failed",
+    "run_failed"
+  ]);
+  assert.match(missingTrace.at(-2).summary, /executor evidence is missing/);
+  assert.match(missingTrace.at(-1).summary, /executor evidence is missing/);
+
+  const missingHtml = await renderRunDetailHtml(missingExecutorCwd, missingExecutorRunId);
+  assert.match(missingHtml, /Run Failed/);
+  assert.match(missingHtml, /Stage Failed/);
+  assert.match(missingHtml, /executor evidence is missing/);
+  assert.match(missingHtml, new RegExp(escapeRegExpForAssert(missingInvocation.executor_evidence_path)));
+  assert.doesNotMatch(missingHtml, /FULL EXECUTOR LOG CONTENT/);
+
+  const blockerCwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], blockerCwd)).code, 0);
+  const blockerRunId = JSON.parse((await runCli(["driver", "start"], blockerCwd)).stdout).run_id;
+  const blockerInvocation = JSON.parse(
+    (await runCli(["driver", "prepare-executor", blockerRunId], blockerCwd)).stdout
+  ).stage_invocation;
+
+  await writeDriverStageReport(blockerCwd, blockerInvocation, {
+    status: "failed",
+    summary: "Static-check is blocked by missing credentials.",
+    blockers: [
+      {
+        type: "human_required",
+        message: "Provide SERVICE_TOKEN before static analysis can continue.",
+        resource: "SERVICE_TOKEN"
+      }
+    ]
+  });
+  await writeDriverExecutorEvidence(blockerCwd, blockerInvocation, {
+    summary: "Executor reported a human-required blocker."
+  });
+  await writeProjectText(blockerCwd, blockerInvocation.stage_log_paths.executor_log_path, "FULL EXECUTOR LOG CONTENT\n");
+
+  const blockerResult = JSON.parse(
+    (await runCli(["driver", "validate-executor", blockerRunId, "--stage", "static_check"], blockerCwd)).stdout
+  );
+  assert.equal(blockerResult.run_status, "failed");
+  assert.equal(blockerResult.failure.kind, "human_required_blocker");
+
+  const blockerTrace = await readJsonLines(path.join(blockerCwd, ".agentmatrix", "runs", blockerRunId, "trace.jsonl"));
+  assert.deepEqual(blockerTrace.map((event) => event.kind), [
+    "run_started",
+    "stage_prepared",
+    "stage_failed",
+    "run_failed"
+  ]);
+  assert.match(blockerTrace.at(-2).summary, /Provide SERVICE_TOKEN/);
+
+  const blockerHtml = await renderRunDetailHtml(blockerCwd, blockerRunId);
+  assert.match(blockerHtml, /Run Failed/);
+  assert.match(blockerHtml, /Stage Failed/);
+  assert.match(blockerHtml, /Provide SERVICE_TOKEN before static analysis can continue/);
+  assert.match(blockerHtml, /stage-report\.json/);
+  assert.match(blockerHtml, /executor-evidence\.json/);
+  assert.doesNotMatch(blockerHtml, /FULL EXECUTOR LOG CONTENT/);
+});
+
+test("driver protocol distinguishes missing verifier evidence and verifier rejection in failure HTML", async () => {
+  const missingVerifierCwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], missingVerifierCwd)).code, 0);
+  const missingVerifierRunId = JSON.parse((await runCli(["driver", "start"], missingVerifierCwd)).stdout).run_id;
+  const missingInvocation = JSON.parse(
+    (await runCli(["driver", "prepare-executor", missingVerifierRunId], missingVerifierCwd)).stdout
+  ).stage_invocation;
+  await writeDriverStageReport(missingVerifierCwd, missingInvocation);
+  await writeDriverExecutorEvidence(missingVerifierCwd, missingInvocation);
+  assert.equal(
+    (await runCli(["driver", "validate-executor", missingVerifierRunId, "--stage", "static_check"], missingVerifierCwd)).code,
+    0
+  );
+  const missingVerifierInvocation = JSON.parse(
+    (await runCli(["driver", "prepare-verifier", missingVerifierRunId, "--stage", "static_check"], missingVerifierCwd)).stdout
+  ).stage_invocation;
+
+  const missingVerifierResult = JSON.parse(
+    (await runCli(["driver", "complete-stage", missingVerifierRunId, "--stage", "static_check"], missingVerifierCwd)).stdout
+  );
+  assert.equal(missingVerifierResult.run_status, "failed");
+  assert.equal(missingVerifierResult.failure.kind, "missing_resource");
+
+  const missingVerifierTrace = await readJsonLines(
+    path.join(missingVerifierCwd, ".agentmatrix", "runs", missingVerifierRunId, "trace.jsonl")
+  );
+  assert.deepEqual(missingVerifierTrace.map((event) => event.kind), [
+    "run_started",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "stage_failed",
+    "run_failed"
+  ]);
+  assert.match(missingVerifierTrace.at(-2).summary, /verifier evidence is missing/);
+
+  const missingVerifierHtml = await renderRunDetailHtml(missingVerifierCwd, missingVerifierRunId);
+  assert.match(missingVerifierHtml, /Run Failed/);
+  assert.match(missingVerifierHtml, /Stage Failed/);
+  assert.match(missingVerifierHtml, /verifier evidence is missing/);
+  assert.match(missingVerifierHtml, new RegExp(escapeRegExpForAssert(missingVerifierInvocation.verifier_evidence_path)));
+
+  const rejectionCwd = await tempProject();
+  assert.equal((await runCli(["init", "--platform", "opencode"], rejectionCwd)).code, 0);
+  const rejectionRunId = JSON.parse((await runCli(["driver", "start"], rejectionCwd)).stdout).run_id;
+  const rejectionInvocation = JSON.parse(
+    (await runCli(["driver", "prepare-executor", rejectionRunId], rejectionCwd)).stdout
+  ).stage_invocation;
+  await writeDriverStageReport(rejectionCwd, rejectionInvocation);
+  await writeDriverExecutorEvidence(rejectionCwd, rejectionInvocation);
+  assert.equal((await runCli(["driver", "validate-executor", rejectionRunId, "--stage", "static_check"], rejectionCwd)).code, 0);
+  const verifier = JSON.parse(
+    (await runCli(["driver", "prepare-verifier", rejectionRunId, "--stage", "static_check"], rejectionCwd)).stdout
+  );
+  await writeDriverVerifierEvidence(rejectionCwd, verifier.stage_invocation, {
+    accepted: false,
+    summary: "Verifier rejected static_check because the report omitted command coverage."
+  });
+  await writeProjectText(rejectionCwd, verifier.stage_invocation.stage_log_paths.verifier_log_path, "FULL VERIFIER LOG CONTENT\n");
+
+  const rejectionResult = JSON.parse(
+    (await runCli(["driver", "complete-stage", rejectionRunId, "--stage", "static_check"], rejectionCwd)).stdout
+  );
+  assert.equal(rejectionResult.run_status, "failed");
+  assert.equal(rejectionResult.failure.kind, "verifier_failure");
+
+  const rejectionTrace = await readJsonLines(path.join(rejectionCwd, ".agentmatrix", "runs", rejectionRunId, "trace.jsonl"));
+  assert.deepEqual(rejectionTrace.map((event) => event.kind), [
+    "run_started",
+    "stage_prepared",
+    "executor_validated",
+    "verifier_prepared",
+    "verifier_completed",
+    "stage_failed",
+    "run_failed"
+  ]);
+  assert.match(rejectionTrace.find((event) => event.kind === "verifier_completed").summary, /Verifier rejected static_check/);
+
+  const rejectionHtml = await renderRunDetailHtml(rejectionCwd, rejectionRunId);
+  assert.match(rejectionHtml, /Verifier Completed/);
+  assert.match(rejectionHtml, /Stage Failed/);
+  assert.match(rejectionHtml, /Run Failed/);
+  assert.match(rejectionHtml, /Verifier rejected static_check because the report omitted command coverage/);
+  assert.match(rejectionHtml, /verifier-evidence\.json/);
+  assert.doesNotMatch(rejectionHtml, /FULL VERIFIER LOG CONTENT/);
 });
 
 test("driver record-event appends platform summaries and run detail HTML renders them", async () => {

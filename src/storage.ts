@@ -435,6 +435,17 @@ export async function completeDriverStage(projectRoot: string, runId: string, st
   const stage = requireRunStage(runState, stageId);
   const stageReportPath = stageReportArtifactPath(runState, stage);
   const verifierEvidencePath = artifactPath(runState, stage.id, "verifier-evidence.json");
+
+  if (!(await pathExists(path.join(paths.projectRoot, verifierEvidencePath)))) {
+    return failDriverStage(paths.projectRoot, runState, stage, {
+      kind: "missing_resource",
+      message: `Stage "${stage.id}" verifier evidence is missing at ${verifierEvidencePath}.`,
+      metadata: {
+        path: verifierEvidencePath
+      }
+    });
+  }
+
   const evidence = await readVerifierEvidence(paths.projectRoot, verifierEvidencePath);
 
   if (evidence?.accepted !== true) {

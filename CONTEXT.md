@@ -8,6 +8,22 @@ AgentMatrix coordinates AI coding agents through explicit workflow stages, evide
 A human-reviewable definition of the engineering process AgentMatrix coordinates.
 _Avoid_: Script, command list
 
+**Workflow Author Agent**:
+An agent role that turns user intent and repository context into a candidate Workflow definition, including stage decomposition and concurrency opportunities, for AgentMatrix Core to validate.
+_Avoid_: Run Driver, workflow scheduler
+
+**Workflow Snapshot**:
+The immutable Workflow definition and content identity captured when a Run starts and used for every later resume of that Run.
+_Avoid_: Editable workflow file, latest workflow version
+
+**Ready Stage**:
+A pending Workflow stage whose declared dependencies have all completed successfully and is therefore eligible for scheduling.
+_Avoid_: Next stage, first pending stage
+
+**Workspace Access**:
+A stage declaration of `read` or `write` access to the shared project workspace. Read stages may run concurrently, while a write stage requires exclusive scheduling by AgentMatrix Core.
+_Avoid_: Prompt-only restriction, operating-system file lock
+
 **Run**:
 A single execution of a workflow, with its own state, events, evidence, and artifacts.
 _Avoid_: Session
